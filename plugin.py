@@ -11,6 +11,7 @@ import base64
 import json
 import random
 import re
+import time
 
 PLUGIN_DIR = Path(__file__).parent
 TAROT_DIR = PLUGIN_DIR / "tarot_jsons"
@@ -117,7 +118,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__: ClassVar[int] = 0
 
     config_version: str = Field(
-        default="1.2.0",
+        default="1.2.1",
         description="配置版本号",
         json_schema_extra={"label": "配置版本", "disabled": True, "hidden": True, "input_type": "text"},
     )
@@ -143,7 +144,7 @@ class ComponentConfig(PluginConfigBase):
     )
     natural_trigger_mode: str = Field(
         default="平衡",
-        description="严格只拦截明确塔罗/占卜请求；平衡兼顾常见自然语言；宽松会尝试拦截更多看看/算算类请求",
+        description="严格只拦截明确塔罗/占卜请求；平衡兼顾常见自然语言；宽松会尝试拦截更多看看/算算类请求，群聊中可能误触普通咨询",
         json_schema_extra={"label": "自然语言触发模式", "x-widget": "select"},
     )
 
@@ -682,6 +683,7 @@ class TarotsPlugin(MaiBotPlugin):
         self._runtime: TarotRuntime | None = None
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self._memory_silent_texts: dict[tuple[str, str], int] = {}
+        self._intercepted_message_keys: dict[tuple[str, str], float] = {}
 
     async def on_load(self) -> None:
         self._runtime = TarotRuntime(self)
@@ -696,6 +698,7 @@ class TarotsPlugin(MaiBotPlugin):
             await asyncio.gather(*to_cancel, return_exceptions=True)
         self._pending_tasks.clear()
         self._memory_silent_texts.clear()
+        self._intercepted_message_keys.clear()
         self.ctx.logger.info("麦麦塔罗插件已卸载")
 
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
@@ -756,7 +759,8 @@ class TarotsPlugin(MaiBotPlugin):
                     natural_trigger_mode["ui_type"] = "select"
                     natural_trigger_mode["label"] = "自然语言触发模式"
                     natural_trigger_mode["hint"] = (
-                        "严格只拦截明确塔罗/占卜请求；平衡兼顾常见自然语言；宽松会尝试拦截更多看看/算算类请求。"
+                        "严格只拦截明确塔罗/占卜请求；平衡兼顾常见自然语言；宽松会尝试拦截更多看看/算算类请求，"
+                        "群聊中可能误触普通咨询，建议谨慎开启。"
                     )
                     natural_trigger_mode["description"] = str(natural_trigger_mode["hint"])
                     natural_trigger_mode["order"] = 11
@@ -865,6 +869,39 @@ class TarotsPlugin(MaiBotPlugin):
             self._memory_silent_texts[key] = count - 1
         return True
 
+    def _build_message_dedupe_key(self, message: dict | None, stream_id: str, request_text: str) -> tuple[str, str]:
+        clean_stream_id = str(stream_id or "").strip()
+        if isinstance(message, dict):
+            message_info = message.get("message_info")
+            if isinstance(message_info, dict):
+                for key in ("message_id", "id", "message_seq", "seq"):
+                    value = str(message_info.get(key) or "").strip()
+                    if value:
+                        return clean_stream_id, value
+            for key in ("message_id", "id", "message_seq", "seq"):
+                value = str(message.get(key) or "").strip()
+                if value:
+                    return clean_stream_id, value
+        return clean_stream_id, self._normalize_request_text(request_text)
+
+    def _mark_intercepted_message(self, message: dict | None, stream_id: str, request_text: str) -> None:
+        key = self._build_message_dedupe_key(message, stream_id, request_text)
+        if not key[0] or not key[1]:
+            return
+        self._cleanup_intercepted_message_keys()
+        self._intercepted_message_keys[key] = time.monotonic() + 10.0
+
+    def _consume_intercepted_message(self, message: dict | None, stream_id: str, request_text: str) -> bool:
+        key = self._build_message_dedupe_key(message, stream_id, request_text)
+        expires_at = self._intercepted_message_keys.pop(key, 0.0)
+        return expires_at >= time.monotonic()
+
+    def _cleanup_intercepted_message_keys(self) -> None:
+        now = time.monotonic()
+        expired_keys = [key for key, expires_at in self._intercepted_message_keys.items() if expires_at < now]
+        for key in expired_keys:
+            self._intercepted_message_keys.pop(key, None)
+
     @HookHandler(
         "send_service.before_send",
         name="tarots_memory_silent_sender",
@@ -935,6 +972,7 @@ class TarotsPlugin(MaiBotPlugin):
         if not stream_id:
             return None
 
+        self._mark_intercepted_message(message, stream_id, request_text)
         self._spawn_background_task(
             self._execute_intercepted_tarots(message, stream_id, request_text),
             "tarots_intercept",
@@ -1066,6 +1104,14 @@ class TarotsPlugin(MaiBotPlugin):
         target_stream_id = stream_id or str(message.get("session_id") or "").strip()
         if not target_stream_id:
             return {"continue_processing": True}
+        if self._consume_intercepted_message(message, target_stream_id, request_text):
+            return {
+                "continue_processing": False,
+                "custom_result": {
+                    "success": True,
+                    "message": "塔罗请求已由 chat.receive.before_process Hook 接管处理",
+                },
+            }
 
         card_type, formation = self._parse_natural_request_options(request_text)
         target_user = self._extract_message_user_nickname(message)
