@@ -41,7 +41,7 @@ class DeckLoadingTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.plugin._plugin_config_instance = SimpleNamespace(
-            cards=SimpleNamespace(using_cards="classic")
+            cards=SimpleNamespace(using_cards="classic", auto_complete_standard_cards=True)
         )
         self.runtime = TarotRuntime(self.plugin)
 
@@ -111,6 +111,36 @@ class DeckLoadingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(pools["全部"]), 78)
         self.assertEqual(cards["standard:22"]["_source"], "builtin")
         self.assertIsNone(cards["standard:22"]["_image_dir"])
+
+    def test_auto_complete_standard_cards_can_be_disabled(self) -> None:
+        self.plugin.config.cards.auto_complete_standard_cards = False
+        builtin = self.runtime._load_validated_deck(
+            BUILTIN_TEXT_DECK_PATH,
+            source_name="builtin",
+            image_dir=None,
+        )
+        classic = self.runtime._load_validated_deck(
+            Path("tarot_jsons/classic/tarots.json"),
+            source_name="classic",
+            image_dir=Path("tarot_jsons/classic"),
+        )
+        selected = {
+            "custom-fool": {
+                **make_card("自定义愚者", standard_id=0, arcana="major"),
+                "_source": "custom",
+                "_image_dir": Path("custom"),
+                "_raw_id": "custom-fool",
+            }
+        }
+
+        cards, pools, native = self.runtime._compose_card_pools(selected, classic, builtin)
+
+        self.assertEqual(native, {"major"})
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(pools[AUTO_CARD_TYPE], ["standard:0"])
+        self.assertEqual(pools["全部"], ["standard:0"])
+        self.assertEqual(pools["大阿卡纳"], ["standard:0"])
+        self.assertEqual(pools["小阿卡纳"], [])
 
     def test_minor_only_custom_deck_uses_auto_minor_pool(self) -> None:
         builtin = self.runtime._load_validated_deck(

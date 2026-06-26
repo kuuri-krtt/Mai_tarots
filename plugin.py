@@ -254,6 +254,11 @@ class CardConfig(PluginConfigBase):
         description="当前使用的牌组目录名，只能选择 tarot_jsons 下包含 tarots.json 的本地牌组",
         json_schema_extra={"label": "当前牌组", "x-widget": "select"},
     )
+    auto_complete_standard_cards: bool = Field(
+        default=True,
+        description="是否使用 classic 和内置纯文字牌库补齐当前牌组缺少的标准塔罗牌",
+        json_schema_extra={"label": "自动补齐标准牌"},
+    )
 
 
 class AdjustmentConfig(PluginConfigBase):
@@ -612,7 +617,12 @@ class TarotRuntime:
     ) -> tuple[dict[str, dict[str, Any]], dict[str, list[str]], set[str]]:
         native_arcana = {card["arcana"] for card in selected_cards.values()}
         standard_sources: dict[int, dict[str, Any]] = {}
-        for source_cards in (builtin_cards, classic_cards, selected_cards):
+        source_decks = (
+            (builtin_cards, classic_cards, selected_cards)
+            if bool(getattr(self.plugin.config.cards, "auto_complete_standard_cards", True))
+            else (selected_cards,)
+        )
+        for source_cards in source_decks:
             for card in source_cards.values():
                 standard_id = card.get("standard_id")
                 if isinstance(standard_id, int):
@@ -1550,6 +1560,16 @@ class TarotsPlugin(MaiBotPlugin):
                     using_cards["ui_type"] = "select"
                     using_cards["label"] = "当前牌组"
                     using_cards["hint"] = "只显示 tarot_jsons 下包含 tarots.json 的本地牌组"
+                    using_cards["order"] = 1
+                auto_complete_standard_cards = fields.get("auto_complete_standard_cards")
+                if isinstance(auto_complete_standard_cards, dict):
+                    auto_complete_standard_cards["label"] = "自动补齐标准牌"
+                    auto_complete_standard_cards["hint"] = (
+                        "开启后，当前牌组缺少的标准塔罗牌会从 classic 和内置纯文字牌库补齐；"
+                        "关闭后，只使用当前牌组自身包含的牌。"
+                    )
+                    auto_complete_standard_cards["description"] = str(auto_complete_standard_cards["hint"])
+                    auto_complete_standard_cards["order"] = 2
 
         adjustment_section = sections.get("adjustment")
         if isinstance(adjustment_section, dict):
