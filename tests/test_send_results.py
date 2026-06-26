@@ -23,6 +23,7 @@ class SendResultTests(unittest.IsolatedAsyncioTestCase):
             send=SimpleNamespace(
                 text=AsyncMock(),
                 image=AsyncMock(),
+                forward=AsyncMock(),
             ),
             logger=SimpleNamespace(error=MagicMock(), warning=MagicMock()),
         )
@@ -38,8 +39,10 @@ class SendResultTests(unittest.IsolatedAsyncioTestCase):
                 send_card_names=True,
                 send_interpretation=False,
                 send_extension_comment=False,
+                output_mode="逐条发送",
             )
         )
+        self.plugin._bot_display_name = "麦麦"
         self.runtime = TarotRuntime(self.plugin)
 
     async def test_text_send_false_is_reported_and_silent_marker_is_rolled_back(self) -> None:
@@ -239,6 +242,59 @@ class SendResultTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(success)
         self.assertEqual(message, "已抽取塔罗牌")
         self.runtime._send_card_image.assert_not_awaited()
+
+    async def test_forward_output_sends_one_forward_and_skips_sequential_sends(self) -> None:
+        self.plugin.config.adjustment.output_mode = "合并转发"
+        self.plugin.config.adjustment.send_preface = True
+        self.plugin.ctx.send.forward.return_value = True
+        self.runtime.card_map = {
+            "0": {
+                "name": "愚者",
+                "info": {"description": "新的开始", "reverseDescription": "鲁莽"},
+            }
+        }
+        self.runtime.formation_map = {"单张": {"cards_num": 1, "is_cut": False, "represent": [["现状"]]}}
+        self.runtime._draw_cards = MagicMock(return_value=[("0", False)])
+        self.runtime._build_preface = AsyncMock(return_value="先静一静。")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "card.jpg"
+            image_path.write_bytes(b"fake-image")
+            self.runtime._find_card_image_path = MagicMock(return_value=image_path)
+
+            success, message = await self.runtime.execute("stream")
+
+        self.assertTrue(success)
+        self.assertEqual(message, "已抽取塔罗牌")
+        self.plugin.ctx.send.forward.assert_awaited_once()
+        self.plugin.ctx.send.text.assert_not_awaited()
+        self.plugin.ctx.send.image.assert_not_awaited()
+        args, kwargs = self.plugin.ctx.send.forward.await_args
+        self.assertEqual(args[1], "stream")
+        self.assertFalse(kwargs["storage_message"])
+        messages = args[0]
+        self.assertEqual(len(messages), 3)
+        self.assertEqual(messages[0]["segments"][0]["type"], "text")
+        self.assertEqual(messages[1]["segments"][0]["type"], "image")
+        self.assertEqual(messages[2]["segments"][0]["type"], "text")
+
+    async def test_forward_output_failure_is_reported(self) -> None:
+        self.plugin.config.adjustment.output_mode = "合并转发"
+        self.plugin.ctx.send.forward.return_value = False
+        self.runtime.card_map = {
+            "0": {
+                "name": "愚者",
+                "info": {"description": "新的开始", "reverseDescription": "鲁莽"},
+            }
+        }
+        self.runtime.formation_map = {"单张": {"cards_num": 1, "is_cut": False, "represent": [["现状"]]}}
+        self.runtime._draw_cards = MagicMock(return_value=[("0", False)])
+        self.runtime._find_card_image_path = MagicMock(return_value=None)
+
+        success, message = await self.runtime.execute("stream")
+
+        self.assertFalse(success)
+        self.assertEqual(message, "合并转发发送失败")
 
 
 if __name__ == "__main__":

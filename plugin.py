@@ -16,6 +16,7 @@ import time
 PLUGIN_DIR = Path(__file__).parent
 TAROT_DIR = PLUGIN_DIR / "tarot_jsons"
 BUILTIN_TEXT_DECK_PATH = PLUGIN_DIR / "resources" / "standard_tarot_text.json"
+COOLDOWN_FILE_PATH = PLUGIN_DIR / "tarot_cooldown.json"
 QQ_ID_PATTERN = re.compile(r"^\d{5,}$")
 STRICT_COMPAT_REQUEST_PATTERN = re.compile(
     r"(占卜一下|帮.*?占卜|给.*?占卜|为.*?占卜|塔罗占卜|塔罗一下|塔罗.*?看看|用塔罗.*?看|抽.*?牌|算一卦|算卦|测一测|测测|问牌)"
@@ -65,12 +66,16 @@ LOOSE_TOPIC_PATTERN = re.compile(
 NATURAL_TRIGGER_MODES = ("严格", "平衡", "宽松")
 DEFAULT_LLM_TASK_NAMES = ("replyer", "utils", "planner")
 AUTO_CARD_TYPE = "自动"
+OUTPUT_MODE_SEQUENTIAL = "逐条发送"
+OUTPUT_MODE_FORWARD = "合并转发"
+OUTPUT_MODES = (OUTPUT_MODE_SEQUENTIAL, OUTPUT_MODE_FORWARD)
 STANDARD_MAJOR_IDS = frozenset(range(22))
 STANDARD_MINOR_IDS = frozenset(range(22, 78))
 MEMORY_SILENT_TTL_SECONDS = 60.0
 MEMORY_SILENT_MAX_ENTRIES = 2048
 MEMORY_SILENT_PLACEHOLDER = "收到"
 DEFAULT_FAILURE_NOTICE_TEXT = "我不小心把牌弄洒了，还在整理，稍后再来找我吧。"
+DEFAULT_COOLDOWN_NOTICE_TEXT = "刚刚已经占卜过了，过{minutes}分钟再来吧。"
 DEFAULT_PREFACE_PROMPT = """{bot_style_context}
 
 请生成一句占卜前的准备台词。
@@ -206,7 +211,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__: ClassVar[int] = 0
 
     config_version: str = Field(
-        default="1.2.1",
+        default="1.2.2",
         description="配置版本号",
         json_schema_extra={"label": "配置版本", "disabled": True, "hidden": True, "input_type": "text"},
     )
@@ -262,6 +267,26 @@ class AdjustmentConfig(PluginConfigBase):
         default=True,
         description="AI 生成文本时是否读取并遵循 MaiBot 当前人格与表达风格",
         json_schema_extra={"label": "遵循 MaiBot 人格"},
+    )
+    output_mode: str = Field(
+        default=OUTPUT_MODE_SEQUENTIAL,
+        description="占卜结果发送方式：逐条发送保留原有延迟；合并转发会把完整结果收集后一次性发送",
+        json_schema_extra={"label": "发送方式", "x-widget": "select"},
+    )
+    cooldown_enabled: bool = Field(
+        default=False,
+        description="是否启用同一用户在同一聊天流中的塔罗占卜冷却限制",
+        json_schema_extra={"label": "启用冷却"},
+    )
+    cooldown_seconds: int = Field(
+        default=3600,
+        description="冷却秒数；仅在启用冷却时生效",
+        json_schema_extra={"label": "冷却秒数"},
+    )
+    cooldown_notice_text: str = Field(
+        default=DEFAULT_COOLDOWN_NOTICE_TEXT,
+        description="冷却中发送的提示文本，可用 {minutes} 和 {seconds}",
+        json_schema_extra={"label": "冷却提示"},
     )
     send_card_names: bool = Field(default=True, description="是否发送抽到的牌名列表", json_schema_extra={"label": "报牌名"})
     send_interpretation: bool = Field(default=True, description="是否发送牌义解读", json_schema_extra={"label": "发送牌义解读"})
@@ -361,6 +386,9 @@ class TarotRuntime:
         self._host_persona_context = ""
         self._host_reply_style = ""
         self._host_persona_cached_at = 0.0
+
+    def _is_forward_output_mode(self) -> bool:
+        return str(getattr(self.plugin.config.adjustment, "output_mode", OUTPUT_MODE_SEQUENTIAL)).strip() == OUTPUT_MODE_FORWARD
 
     async def reload(self) -> None:
         """校验并原子加载配置牌组、classic 后备和内置文字牌库。"""
@@ -695,13 +723,19 @@ class TarotRuntime:
             await self._send_after_delay("error", f"不存在的牌阵：{formation}", stream_id)
             return False, "牌阵错误"
 
+        use_forward = self._is_forward_output_mode()
+        forward_messages: list[dict[str, Any]] = []
+
         if self.plugin.config.adjustment.send_preface:
             card_type_label = "当前牌组原生类别（自动）" if card_type == AUTO_CARD_TYPE else card_type
             preface = await self._build_preface(target_user, card_type_label, formation, user_request)
             if preface:
-                if not await self._send_after_delay("preface", preface, stream_id):
-                    return False, "准备台词发送失败"
-                await asyncio.sleep(0.4)
+                if use_forward:
+                    forward_messages.append(self._make_forward_node("text", preface))
+                else:
+                    if not await self._send_after_delay("preface", preface, stream_id):
+                        return False, "准备台词发送失败"
+                    await asyncio.sleep(0.4)
 
         selected_cards = self._draw_cards(card_type, formation)
         if not selected_cards:
@@ -725,11 +759,18 @@ class TarotRuntime:
                     is_reverse,
                 )
             else:
-                await self._delay_before_send("image")
-                if await self._send_card_image(card_data, is_reverse, stream_id, image_path=image_path):
-                    await asyncio.sleep(0.5)
+                if use_forward:
+                    image_node = self._build_image_node(image_path)
+                    if image_node is None:
+                        failed_images += 1
+                    else:
+                        forward_messages.append(image_node)
                 else:
-                    failed_images += 1
+                    await self._delay_before_send("image")
+                    if await self._send_card_image(card_data, is_reverse, stream_id, image_path=image_path):
+                        await asyncio.sleep(0.5)
+                    else:
+                        failed_images += 1
 
             card_info = card_data.get("info", {})
             card_details.append(
@@ -746,7 +787,8 @@ class TarotRuntime:
             await self._send_after_delay("error", "塔罗牌图片发送失败，无法继续占卜。", stream_id)
             return False, "图片发送失败"
 
-        await asyncio.sleep(1)
+        if not use_forward:
+            await asyncio.sleep(1)
         card_names_text = self._format_card_names(card_details)
         interpretation = ""
         if self.plugin.config.adjustment.send_interpretation:
@@ -763,14 +805,25 @@ class TarotRuntime:
         if self.plugin.config.adjustment.send_interpretation and interpretation:
             result_parts.append(interpretation)
         if result_parts:
-            if not await self._send_after_delay("text", "\n\n".join(result_parts), stream_id):
-                return False, "占卜结果发送失败"
+            result_text = "\n\n".join(result_parts)
+            if use_forward:
+                forward_messages.append(self._make_forward_node("text", result_text))
+            else:
+                if not await self._send_after_delay("text", result_text, stream_id):
+                    return False, "占卜结果发送失败"
 
         if self.plugin.config.adjustment.send_extension_comment:
             extension = await self._build_extension(target_user, formation, interpretation, user_request, card_details)
             if extension:
-                if not await self._send_after_delay("extension", extension, stream_id):
-                    return False, "延伸评论发送失败"
+                if use_forward:
+                    forward_messages.append(self._make_forward_node("text", extension))
+                else:
+                    if not await self._send_after_delay("extension", extension, stream_id):
+                        return False, "延伸评论发送失败"
+
+        if use_forward and forward_messages:
+            if not await self._send_forward_messages(forward_messages, stream_id):
+                return False, "合并转发发送失败"
 
         if target_user:
             return True, f"已为{target_user}抽取塔罗牌"
@@ -823,6 +876,38 @@ class TarotRuntime:
         except Exception as exc:
             self.plugin.ctx.logger.error("发送塔罗牌图片失败: %s", exc, exc_info=True)
             return False
+
+    def _make_forward_node(self, segment_type: str, content: str) -> dict[str, Any]:
+        nickname = str(getattr(self.plugin, "_bot_display_name", "") or "").strip() or "麦麦"
+        return {
+            "user_id": "0",
+            "nickname": nickname,
+            "segments": [{"type": segment_type, "content": content}],
+        }
+
+    def _build_image_node(self, image_path: Path) -> dict[str, Any] | None:
+        try:
+            img_base64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+        except Exception as exc:
+            self.plugin.ctx.logger.error("构建塔罗合并转发图片节点失败: %s", exc, exc_info=True)
+            return None
+        return self._make_forward_node("image", img_base64)
+
+    async def _send_forward_messages(self, messages: list[dict[str, Any]], stream_id: str) -> bool:
+        try:
+            sent = await self.plugin.ctx.send.forward(
+                messages,
+                stream_id,
+                storage_message=False,
+                processed_plain_text="[塔罗占卜结果]",
+            )
+        except Exception as exc:
+            self.plugin.ctx.logger.error("发送塔罗合并转发失败: %s", exc, exc_info=True)
+            return False
+        if not sent:
+            self.plugin.ctx.logger.error("发送塔罗合并转发失败: send.forward 返回 False")
+            return False
+        return True
 
     async def _send_after_delay(self, stage: str, text: str, stream_id: str) -> bool:
         await self._delay_before_send(stage)
@@ -1351,12 +1436,19 @@ class TarotsPlugin(MaiBotPlugin):
         self._intercepted_message_keys: dict[tuple[str, str], float] = {}
         self._stream_execution_locks: dict[str, tuple[asyncio.Lock, int]] = {}
         self._bot_mention_names: tuple[str, ...] = ()
+        self._bot_display_name: str = "麦麦"
         self._available_llm_task_names: tuple[str, ...] = DEFAULT_LLM_TASK_NAMES
+        self._cooldown_file_path: Path = COOLDOWN_FILE_PATH
+        self._cooldown_entries: dict[str, float] = {}
+        self._cooldown_loaded = False
+        self._cooldown_file_lock = asyncio.Lock()
+        self._cooldown_key_locks: dict[str, tuple[asyncio.Lock, int]] = {}
 
     async def on_load(self) -> None:
         await asyncio.gather(
             self._refresh_bot_mention_names(),
             self._refresh_available_llm_task_names(),
+            self._ensure_cooldowns_loaded(),
         )
         self._runtime = TarotRuntime(self)
         await self._runtime.reload()
@@ -1372,6 +1464,9 @@ class TarotsPlugin(MaiBotPlugin):
         self._memory_silent_texts.clear()
         self._intercepted_message_keys.clear()
         self._stream_execution_locks.clear()
+        self._cooldown_entries.clear()
+        self._cooldown_loaded = False
+        self._cooldown_key_locks.clear()
         self.ctx.logger.info("麦麦塔罗插件已卸载")
 
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
@@ -1465,6 +1560,10 @@ class TarotsPlugin(MaiBotPlugin):
                     nickname_source["choices"] = ["QQ昵称", "群名片"]
                     nickname_source["ui_type"] = "select"
                     nickname_source["label"] = "称呼来源"
+                output_mode = fields.get("output_mode")
+                if isinstance(output_mode, dict):
+                    output_mode["choices"] = list(OUTPUT_MODES)
+                    output_mode["ui_type"] = "select"
                 llm_model = fields.get("llm_model")
                 if isinstance(llm_model, dict):
                     configured_task = str(self.config.adjustment.llm_model or "").strip()
@@ -1496,6 +1595,30 @@ class TarotsPlugin(MaiBotPlugin):
                 "label": "通用 / 遵循 MaiBot 人格",
                 "hint": "开启后，所有 AI 生成文本会读取 MaiBot 当前人格与表达风格，并进行一次风格重写；关闭后只遵循塔罗提示词。",
                 "order": 3,
+                "group": "通用",
+            },
+            "output_mode": {
+                "label": "通用 / 发送方式",
+                "hint": "逐条发送保留原有延迟与图片发送方式；合并转发会把准备台词、牌图、牌名解读和延伸评论收集后一次性发送。",
+                "order": 4,
+                "group": "通用",
+            },
+            "cooldown_enabled": {
+                "label": "通用 / 启用冷却",
+                "hint": "开启后，同一用户在同一聊天流中成功占卜后需要等待冷却结束才能再次触发。",
+                "order": 5,
+                "group": "通用",
+            },
+            "cooldown_seconds": {
+                "label": "通用 / 冷却秒数",
+                "hint": "冷却限制的秒数，默认 3600 秒。设置为 0 或负数等同于不限制。",
+                "order": 6,
+                "group": "通用",
+            },
+            "cooldown_notice_text": {
+                "label": "通用 / 冷却提示",
+                "hint": "冷却中发送的固定提示，可用 {minutes} 和 {seconds}。",
+                "order": 7,
                 "group": "通用",
             },
             "send_card_names": {
@@ -1651,6 +1774,182 @@ class TarotsPlugin(MaiBotPlugin):
             self._runtime = TarotRuntime(self)
         return self._runtime
 
+    def _cooldown_file(self) -> Path:
+        return Path(getattr(self, "_cooldown_file_path", COOLDOWN_FILE_PATH))
+
+    async def _ensure_cooldowns_loaded(self) -> None:
+        if bool(getattr(self, "_cooldown_loaded", False)):
+            return
+        lock = getattr(self, "_cooldown_file_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._cooldown_file_lock = lock
+        async with lock:
+            if bool(getattr(self, "_cooldown_loaded", False)):
+                return
+            entries: dict[str, float] = {}
+            path = self._cooldown_file()
+            try:
+                if path.exists():
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    raw_entries = raw.get("entries") if isinstance(raw, dict) else None
+                    if raw_entries is None and isinstance(raw, dict):
+                        raw_entries = raw
+                    if isinstance(raw_entries, dict):
+                        now = time.time()
+                        for key, expires_at in raw_entries.items():
+                            clean_key = str(key or "").strip()
+                            try:
+                                clean_expires_at = float(expires_at)
+                            except (TypeError, ValueError):
+                                continue
+                            if clean_key and clean_expires_at > now:
+                                entries[clean_key] = clean_expires_at
+            except Exception as exc:
+                self.ctx.logger.warning("读取塔罗冷却文件失败，将从空冷却表开始: %s", exc)
+            self._cooldown_entries = entries
+            self._cooldown_loaded = True
+
+    async def _save_cooldowns_locked(self) -> None:
+        path = self._cooldown_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f"{path.name}.tmp")
+        payload = {"entries": dict(sorted(getattr(self, "_cooldown_entries", {}).items()))}
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_path.replace(path)
+
+    def _cleanup_cooldowns(self, now: float | None = None) -> bool:
+        current_time = time.time() if now is None else now
+        entries = getattr(self, "_cooldown_entries", None)
+        if not isinstance(entries, dict):
+            self._cooldown_entries = {}
+            return False
+        expired_keys = [key for key, expires_at in entries.items() if float(expires_at or 0.0) <= current_time]
+        for key in expired_keys:
+            entries.pop(key, None)
+        return bool(expired_keys)
+
+    def _is_cooldown_enabled(self) -> bool:
+        cfg = self.config.adjustment
+        if not bool(getattr(cfg, "cooldown_enabled", False)):
+            return False
+        try:
+            return float(getattr(cfg, "cooldown_seconds", 0) or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _build_cooldown_key(
+        self,
+        stream_id: str,
+        message: dict | None = None,
+        user_id: str = "",
+        platform: str = "",
+    ) -> str:
+        clean_stream_id = str(stream_id or "").strip()
+        clean_user_id = str(user_id or "").strip() or self._extract_message_user_id(message)
+        clean_platform = str(platform or "").strip() or self._extract_message_platform(message)
+        if not clean_stream_id or not clean_user_id:
+            logger_debug = getattr(self.ctx.logger, "debug", None)
+            if callable(logger_debug):
+                logger_debug("塔罗冷却跳过：缺少稳定 user_id 或 stream_id")
+            return ""
+        return "|".join((clean_platform or "unknown", clean_user_id, clean_stream_id))
+
+    async def _acquire_cooldown_key_lock(self, cooldown_key: str) -> asyncio.Lock:
+        registry = getattr(self, "_cooldown_key_locks", None)
+        if registry is None:
+            registry = {}
+            self._cooldown_key_locks = registry
+        lock, users = registry.get(cooldown_key, (asyncio.Lock(), 0))
+        registry[cooldown_key] = (lock, users + 1)
+        try:
+            await lock.acquire()
+        except BaseException:
+            self._release_cooldown_key_waiter(cooldown_key, lock)
+            raise
+        return lock
+
+    def _release_cooldown_key_lock(self, cooldown_key: str, lock: asyncio.Lock) -> None:
+        lock.release()
+        self._release_cooldown_key_waiter(cooldown_key, lock)
+
+    def _release_cooldown_key_waiter(self, cooldown_key: str, lock: asyncio.Lock) -> None:
+        registry = getattr(self, "_cooldown_key_locks", None)
+        if not isinstance(registry, dict):
+            return
+        current = registry.get(cooldown_key)
+        if current is None or current[0] is not lock:
+            return
+        users = current[1] - 1
+        if users <= 0:
+            registry.pop(cooldown_key, None)
+        else:
+            registry[cooldown_key] = (lock, users)
+
+    def _format_cooldown_notice(self, remaining_seconds: float) -> str:
+        seconds = max(1, int(remaining_seconds + 0.999))
+        minutes = max(1, (seconds + 59) // 60)
+        template = str(
+            getattr(self.config.adjustment, "cooldown_notice_text", DEFAULT_COOLDOWN_NOTICE_TEXT)
+            or DEFAULT_COOLDOWN_NOTICE_TEXT
+        )
+        try:
+            return template.format(minutes=minutes, seconds=seconds)
+        except Exception:
+            return DEFAULT_COOLDOWN_NOTICE_TEXT.format(minutes=minutes, seconds=seconds)
+
+    async def _execute_tarot_with_cooldown(
+        self,
+        runtime: TarotRuntime,
+        stream_id: str,
+        card_type: str,
+        formation: str,
+        target_user: str,
+        request_text: str,
+        *,
+        message: dict | None = None,
+        user_id: str = "",
+        platform: str = "",
+    ) -> tuple[bool, str]:
+        if not self._is_cooldown_enabled():
+            return await runtime.execute(stream_id, card_type, formation, target_user, request_text)
+
+        cooldown_key = self._build_cooldown_key(stream_id, message, user_id, platform)
+        if not cooldown_key:
+            return await runtime.execute(stream_id, card_type, formation, target_user, request_text)
+
+        key_lock = await self._acquire_cooldown_key_lock(cooldown_key)
+        try:
+            await self._ensure_cooldowns_loaded()
+            file_lock = getattr(self, "_cooldown_file_lock", None)
+            if file_lock is None:
+                file_lock = asyncio.Lock()
+                self._cooldown_file_lock = file_lock
+
+            async with file_lock:
+                changed = self._cleanup_cooldowns()
+                expires_at = float(getattr(self, "_cooldown_entries", {}).get(cooldown_key, 0.0) or 0.0)
+                remaining = expires_at - time.time()
+                if changed:
+                    await self._save_cooldowns_locked()
+
+            if remaining > 0:
+                notice = self._format_cooldown_notice(remaining)
+                await runtime._send_after_delay("error", notice, stream_id)
+                return False, "塔罗占卜冷却中"
+
+            success, result_message = await runtime.execute(stream_id, card_type, formation, target_user, request_text)
+            if success:
+                async with file_lock:
+                    await self._ensure_cooldowns_loaded()
+                    self._cleanup_cooldowns()
+                    cooldown_seconds = float(getattr(self.config.adjustment, "cooldown_seconds", 3600) or 3600)
+                    self._cooldown_entries[cooldown_key] = time.time() + max(0.0, cooldown_seconds)
+                    await self._save_cooldowns_locked()
+            return success, result_message
+        finally:
+            self._release_cooldown_key_lock(cooldown_key, key_lock)
+
     async def _refresh_available_llm_task_names(self) -> None:
         try:
             available = await self.ctx.llm.get_available_models()
@@ -1679,10 +1978,14 @@ class TarotsPlugin(MaiBotPlugin):
             )
         except Exception:
             self._bot_mention_names = ()
+            self._bot_display_name = "麦麦"
             logger_debug = getattr(self.ctx.logger, "debug", None)
             if callable(logger_debug):
                 logger_debug("塔罗插件读取 Bot 名称失败，不处理文本形式 At", exc_info=True)
             return
+
+        nickname_text = str(nickname or "").strip()
+        self._bot_display_name = nickname_text or "麦麦"
 
         names: list[str] = []
         for value in (nickname, qq_account):
@@ -1962,12 +2265,14 @@ class TarotsPlugin(MaiBotPlugin):
         card_type, formation = self._parse_natural_request_options(request_text)
         target_user = self._extract_message_user_nickname(message)
         runtime = self._runtime_or_create()
-        success, result_message = await runtime.execute(
+        success, result_message = await self._execute_tarot_with_cooldown(
+            runtime,
             stream_id,
             card_type,
             formation,
             target_user,
             request_text,
+            message=message,
         )
         log_method = self.ctx.logger.info if success else self.ctx.logger.warning
         log_method("塔罗自然语言请求已由插件拦截处理: success=%s result=%s", success, result_message)
@@ -2049,7 +2354,15 @@ class TarotsPlugin(MaiBotPlugin):
         runtime = self._runtime_or_create()
         nickname = runtime._normalize_display_name(self._extract_message_user_nickname(message) or target_user)
         request_text = self._normalize_request_text(user_request or text or self._extract_message_text(message))
-        success, result_message = await runtime.execute(stream_id, card_type, formation, nickname, request_text)
+        success, result_message = await self._execute_tarot_with_cooldown(
+            runtime,
+            stream_id,
+            card_type,
+            formation,
+            nickname,
+            request_text,
+            message=message,
+        )
         content = (
             f"{result_message}。插件已发送完整塔罗占卜结果；不要再调用 reply 或 send_emoji，下一步必须 no_action 或 finish，等待新消息。"
             if success
@@ -2099,12 +2412,14 @@ class TarotsPlugin(MaiBotPlugin):
         card_type, formation = self._parse_natural_request_options(request_text)
         target_user = self._extract_message_user_nickname(message)
         runtime = self._runtime_or_create()
-        success, result_message = await runtime.execute(
+        success, result_message = await self._execute_tarot_with_cooldown(
+            runtime,
             target_stream_id,
             card_type,
             formation,
             target_user,
             request_text,
+            message=message,
         )
         return {
             "continue_processing": False,
@@ -2140,7 +2455,16 @@ class TarotsPlugin(MaiBotPlugin):
         card_type, formation = self._parse_command_args(args)
         target_user = self._extract_message_user_nickname(message)
         runtime = self._runtime_or_create()
-        success, result_message = await runtime.execute(stream_id, card_type, formation, target_user, text or args)
+        success, result_message = await self._execute_tarot_with_cooldown(
+            runtime,
+            stream_id,
+            card_type,
+            formation,
+            target_user,
+            text or args,
+            message=message,
+            user_id=user_id,
+        )
         return success, result_message, True
 
     def _extract_message_text(self, message: dict | None) -> str:
@@ -2298,6 +2622,42 @@ class TarotsPlugin(MaiBotPlugin):
             if value and not QQ_ID_PATTERN.fullmatch(value):
                 return value
 
+        return ""
+
+    def _extract_message_user_id(self, message: dict | None) -> str:
+        if not isinstance(message, dict):
+            return ""
+        message_info = message.get("message_info") or {}
+        if not isinstance(message_info, dict):
+            message_info = {}
+        user_info = message_info.get("user_info") or message.get("user_info") or {}
+        if not isinstance(user_info, dict):
+            user_info = {}
+        for source, key in (
+            (user_info, "user_id"),
+            (user_info, "id"),
+            (message, "user_id"),
+            (message, "sender_id"),
+            (message, "qq"),
+        ):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _extract_message_platform(self, message: dict | None) -> str:
+        if not isinstance(message, dict):
+            return ""
+        message_info = message.get("message_info") or {}
+        if not isinstance(message_info, dict):
+            message_info = {}
+        for source, key in (
+            (message, "platform"),
+            (message_info, "platform"),
+        ):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
         return ""
 
     def _parse_command_args(self, args: str) -> tuple[str, str]:

@@ -176,5 +176,8 @@ cython_debug/
 # MaiBot plugin runtime artifacts
 config_back/
 tarots_cache/
+tarot_cooldown.json
+tarot_cooldown.json.tmp
 config.toml.*.bak
 config.toml.backup.*
+config.toml

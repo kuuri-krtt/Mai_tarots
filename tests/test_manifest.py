@@ -16,6 +16,7 @@ class ManifestTests(unittest.TestCase):
             {
                 "send.text",
                 "send.image",
+                "send.forward",
                 "llm.generate",
                 "llm.get_available_models",
                 "config.get",

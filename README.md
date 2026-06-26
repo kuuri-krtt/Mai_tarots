@@ -16,12 +16,18 @@
 
 ## 现版本主要改动
 
-### 1.0.3 重点修复
+### 1.0.4 更新内容
+
+感谢 @xcr1234 通过 issue 贡献。
+
+- 新增合并转发发送模式：可将准备台词、牌面图片、牌名解读和延伸评论收集后通过聊天记录合并发送，减少刷屏。
+- 新增可配置冷却限制：开启后同一用户在同一聊天流内成功占卜后需要等待冷却结束才能再次触发。
+- 合并转发会直接跳过 MaiBot 长期记忆写入；Forward 发送失败不会设置冷却，也不会自动降级重复发送。
+
+### 1.0.3 更新内容
 
 - 修复 AI 生成文本没有反映 MaiBot 人格与表达风格的问题；开启“遵循 MaiBot 人格”后，会读取 MaiBot 现有人格与表达风格并用于文案生成。
 - 修复插件输出仍可能写入长期记忆的问题；插件主动发送的占卜文本会跳过长期记忆写入。
-
-### 上一版基础更新
 
 - 重做自然语言触发规则：支持短指令、At 后文本、英文触发，并保证 `严格 ⊆ 平衡 ⊆ 宽松`，减少误触发。
 - 重做牌组加载：支持自定义牌组缺牌补齐、只有大/小阿卡纳的牌组、缺图纯文字输出，并加入完整内置文字牌库。
@@ -35,7 +41,7 @@
 
 推荐通过 MaiBot 插件市场安装并启用本插件。插件市场会负责下载插件包并放置到正确目录，启用后可在 WebUI 中调整配置。
 
-如果需要手动安装，可以将本仓库目录放入 MaiBot 的 `plugins/Mai_tarots` 目录下，目录内应直接包含 `plugin.py`、`_manifest.json`、`config.toml` 和 `tarot_jsons`。放置完成后重启 MaiBot，或按当前运行环境支持的方式重新加载插件。
+如果需要手动安装，可以将本仓库目录放入 MaiBot 的 `plugins/Mai_tarots` 目录下，目录内应直接包含 `plugin.py`、`_manifest.json` 和 `tarot_jsons`。`config.toml` 会在插件首次加载时由 MaiBot 根据插件内置配置模型自动生成；放置完成后重启 MaiBot，或按当前运行环境支持的方式重新加载插件。
 
 启用后建议先确认以下配置：
 
@@ -107,7 +113,7 @@ pull a card for me
 
 ## 配置说明
 
-配置文件为 `config.toml`。
+配置文件为运行目录中的 `config.toml`。该文件由 MaiBot 在插件首次加载时自动生成，并可通过 WebUI 修改；仓库不再跟踪默认 `config.toml`，发布默认值以插件内置配置模型为准。
 
 关键配置：
 
@@ -117,6 +123,10 @@ pull a card for me
 - `natural_trigger_mode`：自然语言触发强度，可选 `严格`、`平衡`、`宽松`。
 - `using_cards`：当前牌组目录名，必须是 `tarot_jsons` 下包含 `tarots.json` 的目录。
 - `follow_bot_persona`：AI 文本是否遵循 MaiBot 当前人格与表达风格；默认开启。
+- `output_mode`：占卜结果发送方式，可选 `逐条发送` 或 `合并转发`；默认 `逐条发送`。
+- `cooldown_enabled`：是否启用同一用户在同一聊天流中的占卜冷却；默认关闭。
+- `cooldown_seconds`：冷却秒数，默认 `3600`。
+- `cooldown_notice_text`：冷却中发送的提示文案，可用 `{minutes}` 和 `{seconds}`。
 - `send_card_names`：是否在占卜结果中包含抽到的牌名列表。
 - `send_interpretation`：是否包含牌义解读；与牌名列表同时开启时合并为一条消息发送。
 - `ai_interpretation`：是否使用 AI 生成解读；关闭后使用牌组 JSON 中的牌义文本。
@@ -131,6 +141,10 @@ pull a card for me
 - `nickname_source`：称呼来源，可选 `QQ昵称` 或 `群名片`。
 
 插件主动发送的塔罗文字不会写入 MaiBot 消息数据库，也不会触发人物事实长期记忆写回；QQ 平台上的实际显示不受影响。
+
+`output_mode = "合并转发"` 时，插件会调用 `send.forward` 一次性发送完整占卜结果，并使用 `storage_message = false` 避免写入长期记忆。合并转发模式不使用各阶段发送延迟；如果当前平台或适配器不支持合并转发，请切回默认的 `逐条发送`。
+
+冷却限制使用 `platform + user_id + stream_id` 作为 key，因此同一用户在不同群聊或私聊中分别计时。只有占卜成功后才会写入冷却；失败、参数错误、发送失败和合并转发失败都不会计入冷却。冷却数据保存在插件目录下的 `tarot_cooldown.json`。
 
 开启 `follow_bot_persona` 后，AI 生成准备台词、牌义解读、延伸评论和失败提示时，会通过 MaiBot 官方配置能力自动读取当前的 `bot.nickname`、`bot.alias_names`、`personality.personality` 和 `personality.reply_style`，并执行一次风格重写。关闭后不会读取宿主人格，只使用塔罗任务提示词。插件不提供独立的人设配置；宿主人设读取失败时仅保留塔罗任务边界。
 
@@ -229,7 +243,7 @@ tarot_jsons/
 
 - 最低麦麦版本：`1.0.5`
 - SDK：`2.5.2+`
-- 依赖能力：`send.text`、`send.image`、`llm.generate`、`llm.get_available_models`、`config.get`
+- 依赖能力：`send.text`、`send.image`、`send.forward`、`llm.generate`、`llm.get_available_models`、`config.get`
 
 ## 致谢与来源关系
 
