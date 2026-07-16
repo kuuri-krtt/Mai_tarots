@@ -76,6 +76,9 @@ MEMORY_SILENT_MAX_ENTRIES = 2048
 MEMORY_SILENT_PLACEHOLDER = "收到"
 DEFAULT_FAILURE_NOTICE_TEXT = "我不小心把牌弄洒了，还在整理，稍后再来找我吧。"
 DEFAULT_COOLDOWN_NOTICE_TEXT = "刚刚已经占卜过了，过{minutes}分钟再来吧。"
+PREFACE_REWRITE_CONSTRAINTS = """这是占卜前准备台词，不是占卜结果。
+只能改写语气，不得新增任何牌名、正逆位、牌阵位置、抽到什么、牌义、建议或结果倾向。
+如果草稿没有牌面内容，重写后也必须没有牌面内容。"""
 DEFAULT_PREFACE_PROMPT = """{bot_style_context}
 
 请生成一句占卜前的准备台词。
@@ -1255,7 +1258,12 @@ class TarotRuntime:
                 context_line=context_line,
                 cards_info=cards_info,
             )
-            generated = await self._call_llm(prompt, max_len=80, system_prompt=ai_style_context)
+            generated = await self._call_llm(
+                prompt,
+                max_len=80,
+                system_prompt=ai_style_context,
+                rewrite_constraints=PREFACE_REWRITE_CONSTRAINTS,
+            )
             if generated:
                 return generated
         if not user and "{user}" in template:
@@ -1343,7 +1351,13 @@ class TarotRuntime:
             for card in card_details
         )
 
-    async def _call_llm(self, prompt: str, max_len: int, system_prompt: str = "") -> str:
+    async def _call_llm(
+        self,
+        prompt: str,
+        max_len: int,
+        system_prompt: str = "",
+        rewrite_constraints: str = "",
+    ) -> str:
         draft = await self._request_llm_text(
             prompt,
             system_prompt=system_prompt,
@@ -1360,6 +1374,7 @@ class TarotRuntime:
                 system_prompt=system_prompt,
                 reply_style=reply_style,
                 max_len=max_len,
+                rewrite_constraints=rewrite_constraints,
             )
             if styled_reply:
                 reply = styled_reply
@@ -1420,16 +1435,23 @@ class TarotRuntime:
         system_prompt: str,
         reply_style: str,
         max_len: int,
+        rewrite_constraints: str = "",
     ) -> str:
         """将任务草稿统一渲染成宿主当前人格的实际发言。"""
 
-        rewrite_prompt = "\n".join(
+        prompt_lines = [
+            "【最终发言风格渲染】",
+            "请把下面的草稿改写成 MaiBot 当前角色本人会直接发送的发言。",
+            f"必须完整遵守的表达风格：{reply_style}",
+            "逐项落实其中关于语气、用词、句式、立场、口癖、结尾、标点、禁止事项和强制格式的全部要求。",
+        ]
+        constraint_text = str(rewrite_constraints or "").strip()
+        if constraint_text:
+            prompt_lines.extend(["【本次任务重写约束】", constraint_text])
+        else:
+            prompt_lines.append("只改变表达方式，不得改变或遗漏牌名、正逆位、牌阵位置、牌义事实、建议方向和失败原因。")
+        prompt_lines.extend(
             [
-                "【最终发言风格渲染】",
-                "请把下面的草稿改写成 MaiBot 当前角色本人会直接发送的发言。",
-                f"必须完整遵守的表达风格：{reply_style}",
-                "逐项落实其中关于语气、用词、句式、立场、口癖、结尾、标点、禁止事项和强制格式的全部要求。",
-                "只改变表达方式，不得改变或遗漏牌名、正逆位、牌阵位置、牌义事实、建议方向和失败原因。",
                 "保持草稿使用的主要语言，不要添加解释、标签、引号或分析过程。",
                 f"最终文本不得超过 {max_len} 个字符，只输出最终可发送文本。",
                 "",
@@ -1437,6 +1459,7 @@ class TarotRuntime:
                 draft,
             ]
         )
+        rewrite_prompt = "\n".join(prompt_lines)
         return await self._request_llm_text(
             rewrite_prompt,
             system_prompt=system_prompt,

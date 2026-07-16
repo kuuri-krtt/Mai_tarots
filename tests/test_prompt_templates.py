@@ -9,6 +9,7 @@ from plugin import (
     DEFAULT_INTERPRETATION_PROMPT,
     DEFAULT_PREFACE_PROMPT,
     LEGACY_DEFAULT_PREFACE_PROMPTS,
+    PREFACE_REWRITE_CONSTRAINTS,
     TarotRuntime,
     TarotsConfig,
     TarotsPlugin,
@@ -168,9 +169,15 @@ class PrefacePromptTests(unittest.IsolatedAsyncioTestCase):
     async def test_preface_prompt_receives_real_card_facts(self) -> None:
         captured: dict[str, str] = {}
 
-        async def call_llm(prompt: str, max_len: int, system_prompt: str = "") -> str:
+        async def call_llm(
+            prompt: str,
+            max_len: int,
+            system_prompt: str = "",
+            rewrite_constraints: str = "",
+        ) -> str:
             captured["prompt"] = prompt
             captured["system_prompt"] = system_prompt
+            captured["rewrite_constraints"] = rewrite_constraints
             self.assertEqual(max_len, 80)
             return "我先洗牌。"
 
@@ -193,6 +200,37 @@ class PrefacePromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不得向用户公布", captured["prompt"])
         self.assertIn("不要提到具体牌名、正逆位", captured["prompt"])
         self.assertIn("用户占卜请求：测测今天", captured["prompt"])
+        self.assertEqual(captured["rewrite_constraints"], PREFACE_REWRITE_CONSTRAINTS)
+
+    async def test_preface_uses_dedicated_style_rewrite_constraints(self) -> None:
+        captured: dict[str, str] = {}
+
+        async def call_llm(
+            prompt: str,
+            max_len: int,
+            system_prompt: str = "",
+            rewrite_constraints: str = "",
+        ) -> str:
+            del prompt, system_prompt
+            captured["rewrite_constraints"] = rewrite_constraints
+            self.assertEqual(max_len, 80)
+            return "我先洗牌。"
+
+        self.runtime._call_llm = AsyncMock(side_effect=call_llm)
+        card_details = [
+            {
+                "position": "现状",
+                "name": "愚者",
+                "is_reverse": False,
+                "description": "新的开始",
+                "position_meaning": "",
+            }
+        ]
+
+        preface = await self.runtime._build_preface("小明", "全部", "单张", "测测今天", card_details)
+
+        self.assertEqual(preface, "我先洗牌。")
+        self.assertEqual(captured["rewrite_constraints"], PREFACE_REWRITE_CONSTRAINTS)
 
 
 class BotPersonaContextTests(unittest.IsolatedAsyncioTestCase):
@@ -401,6 +439,34 @@ class BotPersonaContextTests(unittest.IsolatedAsyncioTestCase):
         rewrite_prompt = self.plugin.ctx.llm.generate.await_args_list[1].kwargs["prompt"][1]["content"]
         self.assertIn("语气腼腆，避免肯定句，多用迟疑停顿，不要说教。", rewrite_prompt)
         self.assertIn("不得改变或遗漏牌名、正逆位", rewrite_prompt)
+        self.assertEqual(self.plugin.ctx.llm.generate.await_count, 2)
+
+    async def test_rewrite_constraints_replace_generic_tarot_fact_instruction(self) -> None:
+        self.plugin._plugin_config_instance = SimpleNamespace(
+            adjustment=SimpleNamespace(llm_model="replyer")
+        )
+        self.plugin._ctx.llm = SimpleNamespace(
+            generate=AsyncMock(
+                side_effect=[
+                    {"success": True, "response": "我先洗牌。"},
+                    {"success": True, "response": "我先洗牌喵。"},
+                ]
+            )
+        )
+        self.runtime._host_reply_style = "语气可爱，带猫咪口癖。"
+
+        result = await self.runtime._call_llm(
+            "生成准备台词",
+            max_len=80,
+            system_prompt="当前 MaiBot 人格",
+            rewrite_constraints=PREFACE_REWRITE_CONSTRAINTS,
+        )
+
+        self.assertEqual(result, "我先洗牌喵。")
+        rewrite_prompt = self.plugin.ctx.llm.generate.await_args_list[1].kwargs["prompt"][1]["content"]
+        self.assertIn("【本次任务重写约束】", rewrite_prompt)
+        self.assertIn(PREFACE_REWRITE_CONSTRAINTS, rewrite_prompt)
+        self.assertNotIn("不得改变或遗漏牌名、正逆位", rewrite_prompt)
         self.assertEqual(self.plugin.ctx.llm.generate.await_count, 2)
 
     async def test_style_rewrite_failure_falls_back_to_content_draft(self) -> None:
