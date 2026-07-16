@@ -5,14 +5,16 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from plugin import DEFAULT_FAILURE_NOTICE_TEXT, DEFAULT_FAILURE_NOTICE_PROMPT, TarotsPlugin
+from plugin import DEFAULT_FAILURE_NOTICE_TEXT, DEFAULT_FAILURE_NOTICE_PROMPT, TarotRuntime, TarotsPlugin
 
 
 class BackgroundFailureTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.plugin = object.__new__(TarotsPlugin)
+        self.plugin._runtime = None
         self.plugin._pending_tasks = set()
         self.plugin._memory_silent_texts = {}
+        self.plugin._stream_execution_locks = {}
         self.plugin._ctx = SimpleNamespace(
             send=SimpleNamespace(text=AsyncMock(return_value=True)),
             logger=SimpleNamespace(
@@ -26,8 +28,21 @@ class BackgroundFailureTests(unittest.IsolatedAsyncioTestCase):
                 ai_failure_notice=False,
                 failure_notice_text=DEFAULT_FAILURE_NOTICE_TEXT,
                 failure_notice_prompt=DEFAULT_FAILURE_NOTICE_PROMPT,
+                delay_preface_seconds=0,
+                delay_image_seconds=0,
+                delay_text_seconds=0,
+                delay_extension_seconds=0,
+                delay_error_seconds=0,
             )
         )
+
+    def make_ai_runtime(self, *, style_context: str = "风格", generated: str = "") -> TarotRuntime:
+        runtime = TarotRuntime(self.plugin)
+        runtime._render_prompt_template = lambda template, fallback, **kwargs: (template or fallback).format(**kwargs)
+        runtime._build_ai_style_context = AsyncMock(return_value=style_context)
+        runtime._call_llm = AsyncMock(return_value=generated)
+        self.plugin._runtime = runtime
+        return runtime
 
     async def test_background_exception_sends_failure_notice(self) -> None:
         async def fail() -> None:
@@ -86,12 +101,9 @@ class BackgroundFailureTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ai_failure_notice_uses_generated_text_when_enabled(self) -> None:
         self.plugin.config.adjustment.ai_failure_notice = True
-        runtime = SimpleNamespace(
-            _render_prompt_template=lambda template, fallback, **kwargs: (template or fallback).format(**kwargs),
-            _build_ai_style_context=AsyncMock(return_value="风格"),
-            _call_llm=AsyncMock(return_value="这次抽牌没能完成，稍后再试或使用 /塔罗 吧。"),
+        runtime = self.make_ai_runtime(
+            generated="这次抽牌没能完成，稍后再试或使用 /塔罗 吧。",
         )
-        self.plugin._runtime = runtime
 
         await self.plugin._send_background_failure_notice("stream", "tarots_intercept")
 
@@ -103,12 +115,7 @@ class BackgroundFailureTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ai_failure_notice_falls_back_when_generation_is_empty(self) -> None:
         self.plugin.config.adjustment.ai_failure_notice = True
-        runtime = SimpleNamespace(
-            _render_prompt_template=lambda template, fallback, **kwargs: (template or fallback).format(**kwargs),
-            _build_ai_style_context=AsyncMock(return_value="风格"),
-            _call_llm=AsyncMock(return_value=""),
-        )
-        self.plugin._runtime = runtime
+        self.make_ai_runtime(generated="")
 
         await self.plugin._send_background_failure_notice("stream", "tarots_intercept")
 
@@ -119,12 +126,7 @@ class BackgroundFailureTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ai_failure_notice_falls_back_when_generation_times_out(self) -> None:
         self.plugin.config.adjustment.ai_failure_notice = True
-        runtime = SimpleNamespace(
-            _render_prompt_template=lambda template, fallback, **kwargs: (template or fallback).format(**kwargs),
-            _build_ai_style_context=AsyncMock(return_value="风格"),
-            _call_llm=AsyncMock(),
-        )
-        self.plugin._runtime = runtime
+        runtime = self.make_ai_runtime(generated="")
 
         async def timeout_wait_for(awaitable, timeout):
             del timeout
@@ -153,12 +155,9 @@ class BackgroundFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_ai_failure_prompt_is_editable(self) -> None:
         self.plugin.config.adjustment.ai_failure_notice = True
         self.plugin.config.adjustment.failure_notice_prompt = "自定义失败提示：{bot_style_context}"
-        runtime = SimpleNamespace(
-            _render_prompt_template=lambda template, fallback, **kwargs: (template or fallback).format(**kwargs),
-            _build_ai_style_context=AsyncMock(return_value="风格"),
-            _call_llm=AsyncMock(return_value="等我把牌整理好，很快回来。"),
+        runtime = self.make_ai_runtime(
+            generated="等我把牌整理好，很快回来。",
         )
-        self.plugin._runtime = runtime
 
         await self.plugin._send_background_failure_notice("stream", "tarots_intercept")
 
@@ -168,12 +167,10 @@ class BackgroundFailureTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ai_failure_notice_receives_original_request_language(self) -> None:
         self.plugin.config.adjustment.ai_failure_notice = True
-        runtime = SimpleNamespace(
-            _render_prompt_template=lambda template, fallback, **kwargs: (template or fallback).format(**kwargs),
-            _build_ai_style_context=AsyncMock(return_value="English language context"),
-            _call_llm=AsyncMock(return_value="I dropped the cards. Please come back to me later."),
+        runtime = self.make_ai_runtime(
+            style_context="English language context",
+            generated="I dropped the cards. Please come back to me later.",
         )
-        self.plugin._runtime = runtime
 
         await self.plugin._send_background_failure_notice(
             "stream",

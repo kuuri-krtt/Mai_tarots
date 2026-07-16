@@ -43,6 +43,8 @@ class ToolEntryTests(unittest.IsolatedAsyncioTestCase):
             "单张",
             "没空不理",
             "帮忙占卜抽卡运",
+            "",
+            "没空不理",
         )
 
     async def test_tool_drops_placeholder_user_name(self) -> None:

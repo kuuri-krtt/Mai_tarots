@@ -79,6 +79,21 @@ DEFAULT_COOLDOWN_NOTICE_TEXT = "刚刚已经占卜过了，过{minutes}分钟再
 DEFAULT_PREFACE_PROMPT = """{bot_style_context}
 
 请生成一句占卜前的准备台词。
+要求：只输出一句话，10-30字，只表达开始准备、洗牌或正在抽牌。
+不要提前公布结果，不要提到具体牌名、正逆位、牌阵位置、结果倾向或解读。
+如果没有用户昵称，就用“好的”“知道了”“明白了”这类无称呼开头。
+
+{user_line}
+抽牌范围：{card_type}
+牌阵：{formation}
+{context_line}
+
+准备台词："""
+LEGACY_DEFAULT_PREFACE_PROMPTS = frozenset(
+    {
+        """{bot_style_context}
+
+请生成一句占卜前的准备台词。
 要求：只输出一句话，10-30字，不透露具体牌面。
 如果没有用户昵称，就用“好的”“知道了”“明白了”这类无称呼开头。
 
@@ -88,6 +103,8 @@ DEFAULT_PREFACE_PROMPT = """{bot_style_context}
 {context_line}
 
 准备台词："""
+    }
+)
 DEFAULT_INTERPRETATION_PROMPT = """{bot_style_context}
 
 请{target_text}，保持非常简短（2-3句话）。
@@ -211,7 +228,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__: ClassVar[int] = 0
 
     config_version: str = Field(
-        default="1.2.2",
+        default="1.2.3",
         description="配置版本号",
         json_schema_extra={"label": "配置版本", "disabled": True, "hidden": True, "input_type": "text"},
     )
@@ -752,6 +769,40 @@ class TarotRuntime:
         use_forward = self._is_forward_output_mode()
         forward_messages: list[dict[str, Any]] = []
 
+        selected_cards = self._draw_cards(card_type, formation)
+        if not selected_cards:
+            await self._send_after_delay("error", "当前牌组数据不完整，无法抽牌。", stream_id)
+            return False, "牌组数据不完整"
+
+        card_details: list[dict[str, Any]] = []
+        card_send_items: list[tuple[dict[str, Any], bool, Path | None]] = []
+        represent_list = self.formation_map[formation].get("represent", [])
+        for index, (card_id, is_reverse) in enumerate(selected_cards):
+            card_data = self.card_map.get(card_id, {})
+            if not isinstance(card_data, dict):
+                continue
+
+            image_path = self._find_card_image_path(card_data, is_reverse)
+            if image_path is None:
+                self.plugin.ctx.logger.warning(
+                    "塔罗牌缺少图片，继续使用文字结果: source=%s name=%s reverse=%s",
+                    card_data.get("_source", "unknown"),
+                    card_data.get("name", "未知"),
+                    is_reverse,
+                )
+            card_send_items.append((card_data, is_reverse, image_path))
+
+            card_info = card_data.get("info", {})
+            card_details.append(
+                {
+                    "position": self._get_position_name(represent_list, index),
+                    "name": card_data.get("name", "未知"),
+                    "is_reverse": is_reverse,
+                    "description": card_info.get("reverseDescription" if is_reverse else "description", "暂无描述"),
+                    "position_meaning": self._get_position_meaning(represent_list, index, formation),
+                }
+            )
+
         if self.plugin.config.adjustment.send_preface:
             card_type_label = "当前牌组原生类别（自动）" if card_type == AUTO_CARD_TYPE else card_type
             preface = await self._build_preface(target_user, card_type_label, formation, user_request)
@@ -770,51 +821,23 @@ class TarotRuntime:
                         return False, "准备台词发送失败"
                     await asyncio.sleep(0.4)
 
-        selected_cards = self._draw_cards(card_type, formation)
-        if not selected_cards:
-            await self._send_after_delay("error", "当前牌组数据不完整，无法抽牌。", stream_id)
-            return False, "牌组数据不完整"
-
-        card_details: list[dict[str, Any]] = []
         failed_images = 0
-        represent_list = self.formation_map[formation].get("represent", [])
-        for index, (card_id, is_reverse) in enumerate(selected_cards):
-            card_data = self.card_map.get(card_id, {})
-            if not isinstance(card_data, dict):
+        for card_data, is_reverse, image_path in card_send_items:
+            if image_path is None:
                 continue
 
-            image_path = self._find_card_image_path(card_data, is_reverse)
-            if image_path is None:
-                self.plugin.ctx.logger.warning(
-                    "塔罗牌缺少图片，继续使用文字结果: source=%s name=%s reverse=%s",
-                    card_data.get("_source", "unknown"),
-                    card_data.get("name", "未知"),
-                    is_reverse,
-                )
-            else:
-                if use_forward:
-                    image_node = self._build_image_node(image_path)
-                    if image_node is None:
-                        failed_images += 1
-                    else:
-                        forward_messages.append(image_node)
+            if use_forward:
+                image_node = self._build_image_node(image_path)
+                if image_node is None:
+                    failed_images += 1
                 else:
-                    await self._delay_before_send("image")
-                    if await self._send_card_image(card_data, is_reverse, stream_id, image_path=image_path):
-                        await asyncio.sleep(0.5)
-                    else:
-                        failed_images += 1
-
-            card_info = card_data.get("info", {})
-            card_details.append(
-                {
-                    "position": self._get_position_name(represent_list, index),
-                    "name": card_data.get("name", "未知"),
-                    "is_reverse": is_reverse,
-                    "description": card_info.get("reverseDescription" if is_reverse else "description", "暂无描述"),
-                    "position_meaning": self._get_position_meaning(represent_list, index, formation),
-                }
-            )
+                    forward_messages.append(image_node)
+            else:
+                await self._delay_before_send("image")
+                if await self._send_card_image(card_data, is_reverse, stream_id, image_path=image_path):
+                    await asyncio.sleep(0.5)
+                else:
+                    failed_images += 1
 
         if failed_images:
             await self._send_after_delay("error", "塔罗牌图片发送失败，无法继续占卜。", stream_id)
@@ -1566,6 +1589,7 @@ class TarotsPlugin(MaiBotPlugin):
         self._cooldown_key_locks: dict[str, tuple[asyncio.Lock, int]] = {}
 
     async def on_load(self) -> None:
+        self._apply_config_migrations()
         await asyncio.gather(
             self._refresh_bot_mention_names(),
             self._refresh_available_llm_task_names(),
@@ -1592,6 +1616,7 @@ class TarotsPlugin(MaiBotPlugin):
 
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
         del config_data, version
+        self._apply_config_migrations()
         await self._refresh_bot_mention_names()
         if scope == "model":
             await self._refresh_available_llm_task_names()
@@ -1601,6 +1626,30 @@ class TarotsPlugin(MaiBotPlugin):
                 self._runtime._host_reply_style = ""
                 self._runtime._host_persona_cached_at = 0.0
             await self._runtime.reload()
+
+    def _apply_config_migrations(self) -> bool:
+        """Refresh stale built-in prompt defaults without overwriting user edits."""
+
+        try:
+            cfg = self.config
+        except RuntimeError:
+            return False
+
+        changed = False
+        adjustment = getattr(cfg, "adjustment", None)
+        current_preface_prompt = str(getattr(adjustment, "preface_prompt", "") or "").strip()
+        if current_preface_prompt in LEGACY_DEFAULT_PREFACE_PROMPTS:
+            adjustment.preface_prompt = DEFAULT_PREFACE_PROMPT
+            changed = True
+
+        if changed:
+            plugin_cfg = getattr(cfg, "plugin", None)
+            if plugin_cfg is not None:
+                plugin_cfg.config_version = PluginSectionConfig().config_version
+            if hasattr(cfg, "model_dump"):
+                self._plugin_config_data = cfg.model_dump(mode="python")
+            self.ctx.logger.info("麦麦塔罗已迁移旧版默认配置项")
+        return changed
 
     def get_webui_config_schema(
         self,

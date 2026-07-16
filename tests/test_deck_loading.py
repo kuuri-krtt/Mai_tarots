@@ -62,6 +62,34 @@ class DeckLoadingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(card["arcana"] == "minor" for card in cards.values()), 56)
         self.assertTrue(all(card["_image_dir"] is None for card in cards.values()))
 
+    def test_display_name_can_differ_from_standard_image_filename_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            deck_dir = Path(temp_dir)
+            deck_path = deck_dir / "tarots.json"
+            self.write_json(
+                deck_path,
+                {
+                    "23": {
+                        "name": "圣杯2",
+                        "info": {
+                            "description": "关系和谐",
+                            "reverseDescription": "关系失衡",
+                        },
+                    }
+                },
+            )
+            (deck_dir / "圣杯二正位.jpg").write_bytes(b"fake-image")
+            (deck_dir / "圣杯二逆位.jpg").write_bytes(b"fake-image")
+
+            cards = self.runtime._load_validated_deck(
+                deck_path,
+                source_name="custom",
+                image_dir=deck_dir,
+            )
+
+        self.assertEqual(cards["23"]["name"], "圣杯2")
+        self.plugin.ctx.logger.warning.assert_not_called()
+
     def test_major_only_custom_deck_uses_auto_major_and_explicit_full_fallbacks(self) -> None:
         builtin = self.runtime._load_validated_deck(
             BUILTIN_TEXT_DECK_PATH,

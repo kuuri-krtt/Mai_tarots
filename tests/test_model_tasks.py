@@ -16,14 +16,14 @@ class ModelTaskTests(unittest.IsolatedAsyncioTestCase):
             logger=SimpleNamespace(warning=MagicMock()),
         )
 
-    async def test_available_model_tasks_are_loaded_and_sorted(self) -> None:
+    async def test_available_model_tasks_follow_default_priority_order(self) -> None:
         self.plugin.ctx.llm.get_available_models.return_value = ["utils", "replyer", "planner"]
 
         await self.plugin._refresh_available_llm_task_names()
 
         self.assertEqual(
             self.plugin._available_llm_task_names,
-            ("planner", "replyer", "utils"),
+            DEFAULT_LLM_TASK_NAMES,
         )
 
     async def test_model_task_failure_keeps_existing_choices(self) -> None:

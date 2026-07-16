@@ -223,6 +223,55 @@ class SendResultTests(unittest.IsolatedAsyncioTestCase):
             "stream",
         )
 
+    async def test_preface_is_built_after_draw_facts_are_prepared(self) -> None:
+        self.plugin.config.adjustment.send_preface = True
+        self.runtime.card_map = {
+            "0": {
+                "name": "愚者",
+                "info": {"description": "新的开始", "reverseDescription": "鲁莽"},
+            }
+        }
+        self.runtime.formation_map = {"单张": {"cards_num": 1, "is_cut": True, "represent": [["现状"]]}}
+        events: list[str] = []
+
+        def draw_cards(card_type: str, formation: str):
+            del card_type, formation
+            events.append("draw")
+            return [("0", False)]
+
+        def find_card_image(card_data, is_reverse):
+            del card_data, is_reverse
+            events.append("prepare_card")
+            return None
+
+        async def build_preface(*_args, **_kwargs):
+            self.assertEqual(events, ["draw", "prepare_card"])
+            events.append("preface")
+            return "我先洗牌。"
+
+        async def send_preface(*_args, **_kwargs):
+            events.append("send_preface")
+            return True
+
+        async def send_text(stage: str, text: str, stream_id: str):
+            events.append(f"send_{stage}")
+            self.assertEqual(stream_id, "stream")
+            self.assertIn("愚者（正位）", text)
+            return True
+
+        self.runtime._draw_cards = MagicMock(side_effect=draw_cards)
+        self.runtime._find_card_image_path = MagicMock(side_effect=find_card_image)
+        self.runtime._build_preface = AsyncMock(side_effect=build_preface)
+        self.runtime._send_preface_after_delay = AsyncMock(side_effect=send_preface)
+        self.runtime._send_after_delay = AsyncMock(side_effect=send_text)
+
+        with patch("plugin.asyncio.sleep", new=AsyncMock()):
+            success, message = await self.runtime.execute("stream")
+
+        self.assertTrue(success)
+        self.assertEqual(message, "已抽取塔罗牌")
+        self.assertEqual(events, ["draw", "prepare_card", "preface", "send_preface", "send_text"])
+
     async def test_missing_card_image_continues_with_text_result(self) -> None:
         self.runtime.card_map = {
             "0": {

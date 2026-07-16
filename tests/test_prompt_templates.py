@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from plugin import (
     AdjustmentConfig,
     DEFAULT_INTERPRETATION_PROMPT,
+    DEFAULT_PREFACE_PROMPT,
+    LEGACY_DEFAULT_PREFACE_PROMPTS,
     TarotRuntime,
+    TarotsConfig,
     TarotsPlugin,
 )
 
@@ -44,6 +47,36 @@ class PromptTemplateTests(unittest.TestCase):
         self.assertIn("愚者正位", rendered)
         self.plugin.ctx.logger.warning.assert_called_once()
 
+    def test_legacy_default_preface_prompt_is_migrated(self) -> None:
+        plugin = object.__new__(TarotsPlugin)
+        config = TarotsConfig()
+        config.adjustment.preface_prompt = next(iter(LEGACY_DEFAULT_PREFACE_PROMPTS))
+        plugin._plugin_config_instance = config
+        plugin._plugin_config_data = config.model_dump(mode="python")
+        plugin._ctx = SimpleNamespace(logger=SimpleNamespace(info=MagicMock()))
+
+        changed = plugin._apply_config_migrations()
+
+        self.assertTrue(changed)
+        self.assertEqual(plugin.config.adjustment.preface_prompt, DEFAULT_PREFACE_PROMPT)
+        self.assertEqual(
+            plugin.get_plugin_config_data()["adjustment"]["preface_prompt"],
+            DEFAULT_PREFACE_PROMPT,
+        )
+
+    def test_custom_preface_prompt_is_not_migrated(self) -> None:
+        plugin = object.__new__(TarotsPlugin)
+        config = TarotsConfig()
+        config.adjustment.preface_prompt = "自定义准备台词：{formation}"
+        plugin._plugin_config_instance = config
+        plugin._plugin_config_data = config.model_dump(mode="python")
+        plugin._ctx = SimpleNamespace(logger=SimpleNamespace(info=MagicMock()))
+
+        changed = plugin._apply_config_migrations()
+
+        self.assertFalse(changed)
+        self.assertEqual(plugin.config.adjustment.preface_prompt, "自定义准备台词：{formation}")
+
     def test_webui_prompt_fields_are_editable_and_function_sorted(self) -> None:
         plugin = TarotsPlugin()
         plugin._plugin_config_instance = SimpleNamespace(adjustment=AdjustmentConfig())
@@ -54,7 +87,7 @@ class PromptTemplateTests(unittest.TestCase):
         expected = {
             "follow_bot_persona": (3, "通用"),
             "interpretation_prompt": (13, "牌名与解读"),
-            "preface_prompt": (24, "准备台词"),
+            "preface_prompt": (26, "准备台词"),
             "extension_comment_prompt": (34, "延伸评论"),
             "failure_notice_text": (41, "失败处理"),
             "failure_notice_prompt": (42, "失败处理"),

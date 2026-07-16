@@ -24,9 +24,11 @@ class StreamSerializationTests(unittest.IsolatedAsyncioTestCase):
             formation: str,
             target_user: str,
             user_request: str,
+            preface_at_user_id: str,
+            preface_at_user_name: str,
         ) -> tuple[bool, str]:
             nonlocal active, max_active
-            del stream_id, card_type, formation, target_user
+            del stream_id, card_type, formation, target_user, preface_at_user_id, preface_at_user_name
             active += 1
             max_active = max(max_active, active)
             order.append(f"start:{user_request}")
@@ -57,9 +59,11 @@ class StreamSerializationTests(unittest.IsolatedAsyncioTestCase):
             formation: str,
             target_user: str,
             user_request: str,
+            preface_at_user_id: str,
+            preface_at_user_name: str,
         ) -> tuple[bool, str]:
             nonlocal active, max_active
-            del card_type, formation, target_user, user_request
+            del card_type, formation, target_user, user_request, preface_at_user_id, preface_at_user_name
             active += 1
             max_active = max(max_active, active)
             if active == 2:
