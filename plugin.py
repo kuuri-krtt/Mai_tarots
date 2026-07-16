@@ -242,7 +242,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__: ClassVar[int] = 0
 
     config_version: str = Field(
-        default="1.2.3",
+        default="1.2.4",
         description="配置版本号",
         json_schema_extra={"label": "配置版本", "disabled": True, "hidden": True, "input_type": "text"},
     )
@@ -1654,7 +1654,7 @@ class TarotsPlugin(MaiBotPlugin):
             await self._runtime.reload()
 
     def _apply_config_migrations(self) -> bool:
-        """Refresh stale built-in prompt defaults without overwriting user edits."""
+        """Run one-off config migrations that must override stale values."""
 
         try:
             cfg = self.config
@@ -1663,18 +1663,24 @@ class TarotsPlugin(MaiBotPlugin):
 
         changed = False
         adjustment = getattr(cfg, "adjustment", None)
-        current_preface_prompt = str(getattr(adjustment, "preface_prompt", "") or "").strip()
-        if current_preface_prompt in LEGACY_DEFAULT_PREFACE_PROMPTS:
+        plugin_cfg = getattr(cfg, "plugin", None)
+        target_config_version = PluginSectionConfig().config_version
+        current_config_version = str(getattr(plugin_cfg, "config_version", "") or "").strip()
+        force_preface_prompt_migration = current_config_version != target_config_version
+
+        if force_preface_prompt_migration:
+            # 1.1.3 special-case migration: cards_info is required for the
+            # preface prompt bugfix, so stale/custom prompts must be refreshed
+            # once. After config_version is updated, later user edits are kept.
             adjustment.preface_prompt = DEFAULT_PREFACE_PROMPT
             changed = True
 
         if changed:
-            plugin_cfg = getattr(cfg, "plugin", None)
             if plugin_cfg is not None:
-                plugin_cfg.config_version = PluginSectionConfig().config_version
+                plugin_cfg.config_version = target_config_version
             if hasattr(cfg, "model_dump"):
                 self._plugin_config_data = cfg.model_dump(mode="python")
-            self.ctx.logger.info("麦麦塔罗已迁移旧版默认配置项")
+            self.ctx.logger.info("麦麦塔罗已执行配置迁移：强制更新准备台词 AI 提示词")
         return changed
 
     def get_webui_config_schema(
