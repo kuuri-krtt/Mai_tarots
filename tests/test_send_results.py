@@ -244,7 +244,17 @@ class SendResultTests(unittest.IsolatedAsyncioTestCase):
             events.append("prepare_card")
             return None
 
-        async def build_preface(*_args, **_kwargs):
+        async def build_preface(user, card_type, formation, user_request, card_details):
+            self.assertEqual(user, "")
+            self.assertEqual(card_type, "当前牌组原生类别（自动）")
+            self.assertEqual(formation, "单张")
+            self.assertEqual(user_request, "")
+            self.assertEqual(len(card_details), 1)
+            self.assertEqual(card_details[0]["position"], "现状")
+            self.assertEqual(card_details[0]["name"], "愚者")
+            self.assertFalse(card_details[0]["is_reverse"])
+            self.assertEqual(card_details[0]["description"], "新的开始")
+            self.assertTrue(card_details[0]["position_meaning"])
             self.assertEqual(events, ["draw", "prepare_card"])
             events.append("preface")
             return "我先洗牌。"
@@ -326,6 +336,11 @@ class SendResultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages[0]["segments"][0]["type"], "text")
         self.assertEqual(messages[1]["segments"][0]["type"], "image")
         self.assertEqual(messages[2]["segments"][0]["type"], "text")
+        self.assertEqual(messages[2]["segments"][0]["content"], "抽到的牌：\n现状：愚者（正位）")
+        self.runtime._build_preface.assert_awaited_once()
+        preface_args = self.runtime._build_preface.await_args.args
+        self.assertEqual(preface_args[4][0]["name"], "愚者")
+        self.assertFalse(preface_args[4][0]["is_reverse"])
 
     async def test_forward_output_failure_is_reported(self) -> None:
         self.plugin.config.adjustment.output_mode = "合并转发"

@@ -80,7 +80,8 @@ DEFAULT_PREFACE_PROMPT = """{bot_style_context}
 
 请生成一句占卜前的准备台词。
 要求：只输出一句话，10-30字，只表达开始准备、洗牌或正在抽牌。
-不要提前公布结果，不要提到具体牌名、正逆位、牌阵位置、结果倾向或解读。
+本次抽牌事实已确定，仅供你避免编造，不得向用户公布：{cards_info}
+不要提前公布结果，不要提到具体牌名、正逆位、牌阵位置、牌义描述、结果倾向或解读。
 如果没有用户昵称，就用“好的”“知道了”“明白了”这类无称呼开头。
 
 {user_line}
@@ -95,6 +96,19 @@ LEGACY_DEFAULT_PREFACE_PROMPTS = frozenset(
 
 请生成一句占卜前的准备台词。
 要求：只输出一句话，10-30字，不透露具体牌面。
+如果没有用户昵称，就用“好的”“知道了”“明白了”这类无称呼开头。
+
+{user_line}
+抽牌范围：{card_type}
+牌阵：{formation}
+{context_line}
+
+准备台词：""",
+        """{bot_style_context}
+
+请生成一句占卜前的准备台词。
+要求：只输出一句话，10-30字，只表达开始准备、洗牌或正在抽牌。
+不要提前公布结果，不要提到具体牌名、正逆位、牌阵位置、结果倾向或解读。
 如果没有用户昵称，就用“好的”“知道了”“明白了”这类无称呼开头。
 
 {user_line}
@@ -337,7 +351,10 @@ class AdjustmentConfig(PluginConfigBase):
     )
     preface_prompt: str = Field(
         default=DEFAULT_PREFACE_PROMPT,
-        description="AI 准备台词提示词，可用 {bot_style_context} {user_line} {card_type} {formation} {context_line}",
+        description=(
+            "AI 准备台词提示词，可用 "
+            "{bot_style_context} {user_line} {card_type} {formation} {context_line} {cards_info}"
+        ),
         json_schema_extra={"label": "准备台词提示词"},
     )
     send_extension_comment: bool = Field(default=True, description="占卜后是否发送延伸评论", json_schema_extra={"label": "发送延伸评论"})
@@ -805,7 +822,7 @@ class TarotRuntime:
 
         if self.plugin.config.adjustment.send_preface:
             card_type_label = "当前牌组原生类别（自动）" if card_type == AUTO_CARD_TYPE else card_type
-            preface = await self._build_preface(target_user, card_type_label, formation, user_request)
+            preface = await self._build_preface(target_user, card_type_label, formation, user_request, card_details)
             if preface:
                 if use_forward:
                     preface = self._apply_preface_user_name(preface, target_user)
@@ -1206,7 +1223,14 @@ class TarotRuntime:
         context = f"{self._host_persona_context}\n\n{base_context}"
         return self._append_request_language_context(context, user_request)
 
-    async def _build_preface(self, user: str, card_type: str, formation: str, user_request: str) -> str:
+    async def _build_preface(
+        self,
+        user: str,
+        card_type: str,
+        formation: str,
+        user_request: str,
+        card_details: list[dict[str, Any]],
+    ) -> str:
         cfg = self.plugin.config.adjustment
         template = cfg.preface_text.strip()
         if cfg.send_preface and cfg.ai_preface:
@@ -1220,6 +1244,7 @@ class TarotRuntime:
                 else "用户占卜请求：未启用参照语境"
             )
             ai_style_context = await self._build_ai_style_context(user_request)
+            cards_info = self._format_cards_for_prompt(card_details)
             prompt = self._render_prompt_template(
                 cfg.preface_prompt,
                 DEFAULT_PREFACE_PROMPT,
@@ -1228,6 +1253,7 @@ class TarotRuntime:
                 card_type=card_type,
                 formation=formation,
                 context_line=context_line,
+                cards_info=cards_info,
             )
             generated = await self._call_llm(prompt, max_len=80, system_prompt=ai_style_context)
             if generated:
@@ -1865,7 +1891,7 @@ class TarotsPlugin(MaiBotPlugin):
             },
             "preface_prompt": {
                 "label": "准备台词 / AI 提示词",
-                "hint": "占位符：{bot_style_context} {user_line} {card_type} {formation} {context_line}",
+                "hint": "占位符：{bot_style_context} {user_line} {card_type} {formation} {context_line} {cards_info}",
                 "order": 26,
                 "group": "准备台词",
                 "ui_type": "textarea",

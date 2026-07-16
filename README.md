@@ -17,6 +17,11 @@
 
 ## 版本更新
 
+### 1.1.2
+
+- 修复准备台词虽然已在真实抽牌后生成，但提示词仍未接收本次抽牌事实，导致 AI 仍可能从上下文猜测牌面的问题。
+- 准备台词默认提示词新增内部抽牌事实占位符，仅用于避免编造，不会要求提前公布牌名、正逆位或解读；旧默认提示词会自动迁移。
+
 ### 1.1.1
 
 - 通过修改抽牌与台词生成的顺序，改良准备台词可能早于真实抽牌结果生成，导致 AI 编造牌面并与后续结果矛盾的问题。
@@ -162,7 +167,7 @@ AI 相关配置：
 - `send_interpretation` / `ai_interpretation`：是否发送牌义解读，以及是否由 AI 生成。
 - `send_extension_comment` / `ai_extension_comment`：是否发送占卜后延伸评论，以及是否由 AI 生成。
 - `ai_failure_notice`：后台占卜异常或超时时是否使用 AI 生成失败提示。
-- `preface_prompt` / `interpretation_prompt` / `extension_comment_prompt` / `failure_notice_prompt`：四类 AI 输出的可编辑提示词。
+- `preface_prompt` / `interpretation_prompt` / `extension_comment_prompt` / `failure_notice_prompt`：四类 AI 输出的可编辑提示词；准备台词提示词可使用 `{cards_info}` 读取本次抽牌事实，但默认不会提前公布牌面。
 - `preface_text` / `extension_comment_text` / `failure_notice_text`：AI 关闭或生成失败时使用的固定文案。
 
 发送行为说明：

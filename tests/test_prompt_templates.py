@@ -64,6 +64,29 @@ class PromptTemplateTests(unittest.TestCase):
             DEFAULT_PREFACE_PROMPT,
         )
 
+    def test_current_default_preface_prompt_mentions_card_facts_without_revealing_them(self) -> None:
+        self.assertIn("{cards_info}", DEFAULT_PREFACE_PROMPT)
+        self.assertIn("本次抽牌事实已确定", DEFAULT_PREFACE_PROMPT)
+        self.assertIn("不得向用户公布", DEFAULT_PREFACE_PROMPT)
+        self.assertIn("不要提到具体牌名、正逆位", DEFAULT_PREFACE_PROMPT)
+
+    def test_legacy_defaults_include_previous_preface_prompt(self) -> None:
+        previous_default = """{bot_style_context}
+
+请生成一句占卜前的准备台词。
+要求：只输出一句话，10-30字，只表达开始准备、洗牌或正在抽牌。
+不要提前公布结果，不要提到具体牌名、正逆位、牌阵位置、结果倾向或解读。
+如果没有用户昵称，就用“好的”“知道了”“明白了”这类无称呼开头。
+
+{user_line}
+抽牌范围：{card_type}
+牌阵：{formation}
+{context_line}
+
+准备台词："""
+
+        self.assertIn(previous_default, LEGACY_DEFAULT_PREFACE_PROMPTS)
+
     def test_custom_preface_prompt_is_not_migrated(self) -> None:
         plugin = object.__new__(TarotsPlugin)
         config = TarotsConfig()
@@ -101,6 +124,51 @@ class PromptTemplateTests(unittest.TestCase):
                     self.assertGreaterEqual(fields[name]["rows"], 9)
         self.assertEqual(fields["llm_model"]["ui_type"], "select")
         self.assertEqual(fields["llm_model"]["choices"], ["planner", "replyer", "utils"])
+
+
+class PrefacePromptTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.plugin = object.__new__(TarotsPlugin)
+        self.plugin._plugin_config_instance = SimpleNamespace(adjustment=AdjustmentConfig())
+        self.plugin.config.adjustment.follow_bot_persona = False
+        self.plugin._ctx = SimpleNamespace(
+            logger=SimpleNamespace(
+                debug=MagicMock(),
+                info=MagicMock(),
+                warning=MagicMock(),
+                error=MagicMock(),
+            )
+        )
+        self.runtime = TarotRuntime(self.plugin)
+
+    async def test_preface_prompt_receives_real_card_facts(self) -> None:
+        captured: dict[str, str] = {}
+
+        async def call_llm(prompt: str, max_len: int, system_prompt: str = "") -> str:
+            captured["prompt"] = prompt
+            captured["system_prompt"] = system_prompt
+            self.assertEqual(max_len, 80)
+            return "我先洗牌。"
+
+        self.runtime._call_llm = AsyncMock(side_effect=call_llm)
+        card_details = [
+            {
+                "position": "现状",
+                "name": "愚者",
+                "is_reverse": False,
+                "description": "新的开始",
+                "position_meaning": "",
+            }
+        ]
+
+        preface = await self.runtime._build_preface("小明", "全部", "单张", "测测今天", card_details)
+
+        self.assertEqual(preface, "我先洗牌。")
+        self.assertIn("现状：愚者（正位，新的开始）", captured["prompt"])
+        self.assertIn("本次抽牌事实已确定", captured["prompt"])
+        self.assertIn("不得向用户公布", captured["prompt"])
+        self.assertIn("不要提到具体牌名、正逆位", captured["prompt"])
+        self.assertIn("用户占卜请求：测测今天", captured["prompt"])
 
 
 class BotPersonaContextTests(unittest.IsolatedAsyncioTestCase):
