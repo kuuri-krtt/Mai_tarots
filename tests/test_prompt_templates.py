@@ -8,6 +8,7 @@ from plugin import (
     AdjustmentConfig,
     DEFAULT_INTERPRETATION_PROMPT,
     DEFAULT_PREFACE_PROMPT,
+    DEFAULT_PREFACE_TEXT,
     LEGACY_DEFAULT_PREFACE_PROMPTS,
     PREFACE_REWRITE_CONSTRAINTS,
     TarotRuntime,
@@ -48,7 +49,7 @@ class PromptTemplateTests(unittest.TestCase):
         self.assertIn("愚者正位", rendered)
         self.plugin.ctx.logger.warning.assert_called_once()
 
-    def test_old_config_version_forces_preface_prompt_migration(self) -> None:
+    def test_old_config_version_keeps_custom_preface_prompt(self) -> None:
         plugin = object.__new__(TarotsPlugin)
         config = TarotsConfig()
         config.plugin.config_version = "1.2.3"
@@ -60,11 +61,11 @@ class PromptTemplateTests(unittest.TestCase):
         changed = plugin._apply_config_migrations()
 
         self.assertTrue(changed)
-        self.assertEqual(plugin.config.adjustment.preface_prompt, DEFAULT_PREFACE_PROMPT)
+        self.assertEqual(plugin.config.adjustment.preface_prompt, "自定义准备台词：{formation}")
         self.assertEqual(plugin.config.plugin.config_version, TarotsConfig().plugin.config_version)
         self.assertEqual(
             plugin.get_plugin_config_data()["adjustment"]["preface_prompt"],
-            DEFAULT_PREFACE_PROMPT,
+            "自定义准备台词：{formation}",
         )
         self.assertEqual(
             plugin.get_plugin_config_data()["plugin"]["config_version"],
@@ -121,9 +122,35 @@ class PromptTemplateTests(unittest.TestCase):
         changed = plugin._apply_config_migrations()
 
         self.assertTrue(changed)
-        self.assertEqual(plugin.config.adjustment.preface_prompt, DEFAULT_PREFACE_PROMPT)
+        self.assertEqual(plugin.config.adjustment.preface_prompt, "自定义准备台词：{formation}")
         self.assertEqual(plugin.config.adjustment.preface_text, "自定义固定台词")
         self.assertFalse(plugin.config.adjustment.send_preface)
+
+    def test_all_known_default_prompts_migrate_once(self) -> None:
+        for old_prompt in LEGACY_DEFAULT_PREFACE_PROMPTS:
+            with self.subTest(prompt=old_prompt):
+                plugin = object.__new__(TarotsPlugin)
+                config = TarotsConfig()
+                config.adjustment.preface_prompt = old_prompt
+                config.adjustment.preface_text = "好的，我这就抽一张牌。"
+                plugin._plugin_config_instance = config
+                plugin._ctx = SimpleNamespace(logger=SimpleNamespace(info=MagicMock()))
+                self.assertTrue(plugin._apply_config_migrations())
+                self.assertEqual(config.adjustment.preface_prompt, DEFAULT_PREFACE_PROMPT)
+                self.assertEqual(config.adjustment.preface_text, DEFAULT_PREFACE_TEXT)
+                self.assertFalse(plugin._apply_config_migrations())
+
+    def test_modified_default_prompt_is_preserved(self) -> None:
+        plugin = object.__new__(TarotsPlugin)
+        config = TarotsConfig()
+        custom = next(iter(LEGACY_DEFAULT_PREFACE_PROMPTS)) + "\n请用我的语气。"
+        config.adjustment.preface_prompt = custom
+        config.adjustment.preface_text = "我来看看：{user_request}"
+        plugin._plugin_config_instance = config
+        plugin._ctx = SimpleNamespace(logger=SimpleNamespace(info=MagicMock()))
+        self.assertFalse(plugin._apply_config_migrations())
+        self.assertEqual(config.adjustment.preface_prompt, custom)
+        self.assertEqual(config.adjustment.preface_text, "我来看看：{user_request}")
 
     def test_webui_prompt_fields_are_editable_and_function_sorted(self) -> None:
         plugin = TarotsPlugin()
