@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from plugin import (
+    AdjustmentConfig,
     MEMORY_SILENT_MAX_ENTRIES,
     MEMORY_SILENT_PLACEHOLDER,
     MEMORY_SILENT_TTL_SECONDS,
@@ -25,7 +26,7 @@ class SendResultTests(unittest.IsolatedAsyncioTestCase):
                 image=AsyncMock(),
                 forward=AsyncMock(),
             ),
-            logger=SimpleNamespace(error=MagicMock(), warning=MagicMock()),
+            logger=SimpleNamespace(error=MagicMock(), warning=MagicMock(), debug=MagicMock()),
         )
         self.plugin._plugin_config_instance = SimpleNamespace(
             plugin=SimpleNamespace(enabled=True),
@@ -44,6 +45,61 @@ class SendResultTests(unittest.IsolatedAsyncioTestCase):
         )
         self.plugin._bot_display_name = "麦麦"
         self.runtime = TarotRuntime(self.plugin)
+
+    async def test_extension_sends_ai_result_or_fallback_once(self) -> None:
+        long_reply = "请给自己留出足够的观察时间，认真分辨眼前的机会是否符合真正的期待，也不要因为一时的犹豫否定已经付出的努力，接下来选择一件能够做到的小事慢慢推进就好。"
+        self.assertGreater(len(long_reply), 60)
+        for output_mode in ("逐条发送", "合并转发"):
+            for ai_enabled, generated, expected in (
+                (True, "保持耐心。", "保持耐心。"),
+                (True, long_reply, long_reply),
+                (True, "", "固定保底文案"),
+                (False, long_reply, "固定保底文案"),
+            ):
+                with self.subTest(mode=output_mode, ai=ai_enabled, generated=generated):
+                    self.plugin._plugin_config_instance.adjustment = AdjustmentConfig(
+                        output_mode=output_mode,
+                        send_preface=False,
+                        send_card_names=False,
+                        send_interpretation=False,
+                        send_extension_comment=True,
+                        ai_extension_comment=ai_enabled,
+                        extension_comment_text="固定保底文案",
+                    )
+                    self.runtime.card_map = {
+                        "0": {"name": "愚者", "info": {"description": "开始"}},
+                    }
+                    self.runtime.formation_map = {
+                        "单张": {"cards_num": 1, "is_cut": False, "represent": [["现状"]]},
+                    }
+                    self.runtime._draw_cards = MagicMock(return_value=[("0", False)])
+                    self.runtime._find_card_image_path = MagicMock(return_value=None)
+                    self.runtime._build_ai_style_context = AsyncMock(return_value="角色风格")
+                    self.runtime._host_reply_style = "自然表达"
+                    self.runtime._request_llm_text = AsyncMock(return_value=generated)
+                    self.runtime._send_after_delay = AsyncMock(return_value=True)
+                    self.runtime._send_forward_messages = AsyncMock(return_value=True)
+
+                    with patch("plugin.asyncio.sleep", new=AsyncMock()):
+                        success, _ = await self.runtime.execute("stream")
+
+                    self.assertTrue(success)
+                    if output_mode == "逐条发送":
+                        self.runtime._send_after_delay.assert_awaited_once_with(
+                            "extension", expected, "stream",
+                        )
+                        self.runtime._send_forward_messages.assert_not_awaited()
+                    else:
+                        self.runtime._send_after_delay.assert_not_awaited()
+                        self.runtime._send_forward_messages.assert_awaited_once()
+                        nodes = self.runtime._send_forward_messages.await_args.args[0]
+                        self.assertEqual(len(nodes), 1)
+                        self.assertEqual(nodes[0]["segments"][0]["content"], expected)
+                    if not ai_enabled:
+                        self.runtime._request_llm_text.assert_not_awaited()
+                    elif generated:
+                        rewrite_prompt = self.runtime._request_llm_text.await_args.args[0]
+                        self.assertIn("最终文本字数不限", rewrite_prompt)
 
     async def test_text_send_false_is_reported_and_silent_marker_is_rolled_back(self) -> None:
         self.plugin.ctx.send.text.return_value = False

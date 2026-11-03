@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from plugin import (
     AdjustmentConfig,
+    LLM_RPC_TIMEOUT_MS,
     DEFAULT_INTERPRETATION_PROMPT,
     DEFAULT_PREFACE_PROMPT,
     DEFAULT_PREFACE_TEXT,
@@ -495,6 +496,49 @@ class BotPersonaContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(PREFACE_REWRITE_CONSTRAINTS, rewrite_prompt)
         self.assertNotIn("不得改变或遗漏牌名、正逆位", rewrite_prompt)
         self.assertEqual(self.plugin.ctx.llm.generate.await_count, 2)
+
+    async def test_overlong_style_rewrite_keeps_valid_content_draft(self) -> None:
+        self.runtime._request_llm_text = AsyncMock(
+            side_effect=["先别急，慢慢处理。", "超" * 101],
+        )
+        self.runtime._host_reply_style = "说话简短。"
+
+        result = await self.runtime._call_llm(
+            "生成解读", max_len=100, system_prompt="当前 MaiBot 人格",
+        )
+
+        self.assertEqual(result, "先别急，慢慢处理。")
+        self.plugin.ctx.logger.warning.assert_called_once()
+
+    async def test_ai_rpc_timeout_is_forwarded_through_sdk(self) -> None:
+        from maibot_sdk.capabilities.llm import LLMCapability
+
+        capability_context = SimpleNamespace(
+            call_capability=AsyncMock(return_value={"success": True, "response": "慢慢来。"}),
+        )
+        self.plugin._plugin_config_instance = SimpleNamespace(
+            adjustment=SimpleNamespace(llm_model="replyer"),
+        )
+        self.plugin._ctx.llm = LLMCapability(capability_context)
+
+        result = await self.runtime._request_llm_text("延伸评论")
+
+        self.assertEqual(result, "慢慢来。")
+        call = capability_context.call_capability.await_args
+        self.assertEqual(call.args, ("llm.generate",))
+        self.assertEqual(call.kwargs["timeout_ms"], LLM_RPC_TIMEOUT_MS)
+
+    async def test_overlong_draft_and_rewrite_still_return_empty(self) -> None:
+        self.runtime._request_llm_text = AsyncMock(
+            side_effect=["长" * 101, "超" * 101],
+        )
+        self.runtime._host_reply_style = "说话简短。"
+
+        result = await self.runtime._call_llm(
+            "生成解读", max_len=100, system_prompt="当前 MaiBot 人格",
+        )
+
+        self.assertEqual(result, "")
 
     async def test_style_rewrite_failure_falls_back_to_content_draft(self) -> None:
         self.plugin._plugin_config_instance = SimpleNamespace(

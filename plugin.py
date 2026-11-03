@@ -17,6 +17,9 @@ PLUGIN_DIR = Path(__file__).parent
 TAROT_DIR = PLUGIN_DIR / "tarot_jsons"
 BUILTIN_TEXT_DECK_PATH = PLUGIN_DIR / "resources" / "standard_tarot_text.json"
 COOLDOWN_FILE_PATH = PLUGIN_DIR / "tarot_cooldown.json"
+# 三个生成阶段各可能执行一次风格重写；入口需覆盖六次 AI 等待及发送耗时。
+LLM_RPC_TIMEOUT_MS = 60_000
+TAROT_EXECUTION_TIMEOUT_SECONDS = 420.0
 QQ_ID_PATTERN = re.compile(r"^\d{5,}$")
 STRICT_COMPAT_REQUEST_PATTERN = re.compile(
     r"(占卜一下|帮.*?占卜|给.*?占卜|为.*?占卜|塔罗占卜|塔罗一下|塔罗.*?看看|用塔罗.*?看|抽.*?牌|算一卦|算卦|测一测|测测|问牌)"
@@ -1328,7 +1331,7 @@ class TarotRuntime:
                 context_text=context_text,
                 interpretation=interpretation,
             )
-            generated = await self._call_llm(prompt, max_len=60, system_prompt=ai_style_context)
+            generated = await self._call_llm(prompt, max_len=0, system_prompt=ai_style_context)
             if generated:
                 return generated
         if not user and "{user}" in template:
@@ -1390,7 +1393,8 @@ class TarotRuntime:
                 max_len=max_len,
                 rewrite_constraints=rewrite_constraints,
             )
-            if styled_reply:
+            styled_reply = self._normalize_llm_reply(styled_reply)
+            if styled_reply and (max_len <= 0 or len(styled_reply) <= max_len):
                 reply = styled_reply
                 self.plugin.ctx.logger.debug(
                     "塔罗 AI 风格重写完成: draft_chars=%s styled_chars=%s",
@@ -1398,12 +1402,12 @@ class TarotRuntime:
                     len(styled_reply),
                 )
             else:
-                self.plugin.ctx.logger.warning("塔罗 AI 风格重写失败，回退到内容草稿")
+                self.plugin.ctx.logger.warning("塔罗 AI 风格重写失败或结果超长，回退到内容草稿")
         elif system_prompt.strip():
             self.plugin.ctx.logger.debug("塔罗 AI 本次未执行风格重写: personality.reply_style 为空")
 
         reply = self._normalize_llm_reply(reply)
-        if 0 < len(reply) <= max_len:
+        if reply and (max_len <= 0 or len(reply) <= max_len):
             return reply
         return ""
 
@@ -1427,6 +1431,7 @@ class TarotRuntime:
                 prompt=llm_prompt,
                 task_name=self.plugin.config.adjustment.llm_model or "replyer",
                 temperature=temperature,
+                timeout_ms=LLM_RPC_TIMEOUT_MS,
             )
         except Exception as exc:
             self.plugin.ctx.logger.error("塔罗插件调用 LLM 失败: %s", exc, exc_info=True)
@@ -1467,7 +1472,11 @@ class TarotRuntime:
         prompt_lines.extend(
             [
                 "保持草稿使用的主要语言，不要添加解释、标签、引号或分析过程。",
-                f"最终文本不得超过 {max_len} 个字符，只输出最终可发送文本。",
+                (
+                    f"最终文本不得超过 {max_len} 个字符，只输出最终可发送文本。"
+                    if max_len > 0
+                    else "最终文本字数不限，只输出最终可发送文本。"
+                ),
                 "",
                 "【待改写草稿】",
                 draft,
@@ -2489,7 +2498,7 @@ class TarotsPlugin(MaiBotPlugin):
         self,
         coro: Any,
         label: str,
-        timeout: float = 120.0,
+        timeout: float = TAROT_EXECUTION_TIMEOUT_SECONDS,
         failure_stream_id: str = "",
         failure_user_request: str = "",
     ) -> asyncio.Task[Any]:
@@ -2625,7 +2634,7 @@ class TarotsPlugin(MaiBotPlugin):
                 default="",
             ),
         ],
-        timeout_ms=120000,
+        timeout_ms=int(TAROT_EXECUTION_TIMEOUT_SECONDS * 1000),
     )
     async def handle_tarots_tool(
         self,
@@ -2733,6 +2742,7 @@ class TarotsPlugin(MaiBotPlugin):
             "[全部|大阿卡纳|小阿卡纳] [牌阵]；未填写范围时使用当前牌组原生类别"
         ),
         pattern=r"^(?:/塔罗|/tarot|/tarots)(?:\s+(?P<args>.*))?\s*$",
+        timeout_ms=int(TAROT_EXECUTION_TIMEOUT_SECONDS * 1000),
     )
     async def handle_tarots_command(
         self,
